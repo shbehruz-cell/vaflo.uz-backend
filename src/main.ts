@@ -42,7 +42,8 @@ async function bootstrap() {
   }
 
   const port = Number(process.env.PORT ?? 4000);
-  await app.listen(port);
+  // HOST=127.0.0.1 — API faqat server ichidan (nginx/frontend orqali) ochiladi
+  await app.listen(port, process.env.HOST ?? '0.0.0.0');
   Logger.log(`API: http://localhost:${port}/api/v1${isProd ? '' : `  •  Docs: http://localhost:${port}/api/docs`}`, 'Bootstrap');
 }
 await bootstrap();

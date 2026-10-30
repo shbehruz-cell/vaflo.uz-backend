@@ -37,7 +37,8 @@ export class AuthService {
   private cookieOpts() {
     return {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      // HTTPS bo‘lmagan (faqat IP) serverda COOKIE_SECURE=false; domen+HTTPS ulanganda olib tashlang
+      secure: process.env.COOKIE_SECURE ? process.env.COOKIE_SECURE === 'true' : process.env.NODE_ENV === 'production',
       sameSite: 'lax' as const,
       path: '/api/v1/auth',
     };
