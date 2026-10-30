@@ -40,7 +40,7 @@ npm run start:dev
 - Pul/miqdor — `Decimal`; qoldiq faqat `StockService.apply()` orqali atomik o‘zgaradi.
 - Xato formati: `{ statusCode, error, message, requestId }` — stack trace clientga chiqmaydi.
 - Parollar argon2id; refresh token bazada faqat SHA-256 xesh ko‘rinishida.
-- `npm run db:seed` production’da ishlamaydi.
+- `npm run db:seed` production’da faqat do‘kon, ombor, kassa, rollar va Owner yaratadi (demo mahsulotlarsiz).
 
 ## Hali qilinmagan (TZ keyingi bosqichlari)
 

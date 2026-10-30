@@ -5,10 +5,9 @@ import { PrismaClient } from '../src/generated/prisma/client.js';
 import { normalizeLogin } from '../src/common/normalize.js';
 import { ALL_PERMISSIONS, DEFAULT_ROLES, PERMISSIONS } from '../src/common/permissions.js';
 
-if (process.env.NODE_ENV === 'production') {
-  console.error('Seed production muhitida ishlamaydi.');
-  process.exit(1);
-}
+// Production'da faqat boshlang‘ich sozlash (do‘kon, ombor, kassa, rollar, Owner) — demo mahsulotlarsiz (TZ 18).
+// Do‘kon allaqachon bo‘lsa, faqat permissionlar yangilanadi, shuning uchun qayta ishga tushirish xavfsiz.
+const IS_PROD = process.env.NODE_ENV === 'production';
 
 const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }) });
 
@@ -79,6 +78,8 @@ async function main() {
     const owner = await tx.user.create({
       data: { storeId: store.id, roleId: roleIds.owner!, name: 'Owner', login, passwordHash },
     });
+
+    if (IS_PROD) return { storeId: store.id };
 
     const category = await tx.category.create({ data: { storeId: store.id, name: 'Oziq-ovqat' } });
 
