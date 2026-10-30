@@ -1,0 +1,499 @@
+// VAFLO.UZ ma'lumotlar modeli — TZ 16-bo'lim asosida.
+// Pul: Decimal(14,2), miqdor: Decimal(14,3). Floating point ishlatilmaydi.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────── Kirish va ruxsatlar ─────────────
+
+enum UserStatus {
+  ACTIVE
+  BLOCKED
+}
+
+model User {
+  id           String     @id @default(uuid()) @db.Uuid
+  storeId      String     @db.Uuid
+  roleId       String     @db.Uuid
+  name         String
+  login        String     @unique // email yoki telefon (normalizatsiya qilingan)
+  passwordHash String
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  store               Store                @relation(fields: [storeId], references: [id])
+  role                Role                 @relation(fields: [roleId], references: [id])
+  sessions            Session[]
+  registerAssignments RegisterAssignment[]
+
+  @@index([storeId])
+}
+
+model Session {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique // refresh token SHA-256
+  userAgent String?
+  ip        String?
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Role {
+  id        String   @id @default(uuid()) @db.Uuid
+  storeId   String   @db.Uuid
+  key       String // owner | deputy | worker | custom-...
+  name      String
+  isSystem  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  store       Store            @relation(fields: [storeId], references: [id])
+  users       User[]
+  permissions RolePermission[]
+
+  @@unique([storeId, key])
+}
+
+model Permission {
+  code        String           @id // masalan: products.manage
+  description String
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId         String @db.Uuid
+  permissionCode String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionCode], references: [code])
+
+  @@id([roleId, permissionCode])
+}
+
+// ───────────── Do'kon, ombor, kassa ─────────────
+
+enum EntityStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+model Store {
+  id        String       @id @default(uuid()) @db.Uuid
+  name      String
+  timezone  String       @default("Asia/Tashkent")
+  status    EntityStatus @default(ACTIVE)
+  settings  Json         @default("{}")
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  users      User[]
+  roles      Role[]
+  warehouses Warehouse[]
+  registers  Register[]
+  categories Category[]
+  products   Product[]
+  customers  Customer[]
+  sales      Sale[]
+  auditLogs  AuditLog[]
+}
+
+model Warehouse {
+  id        String       @id @default(uuid()) @db.Uuid
+  storeId   String       @db.Uuid
+  name      String
+  code      String
+  status    EntityStatus @default(ACTIVE)
+  createdAt DateTime     @default(now())
+
+  store     Store           @relation(fields: [storeId], references: [id])
+  balances  StockBalance[]
+  movements StockMovement[]
+  registers Register[]
+
+  @@unique([storeId, code])
+}
+
+model Register {
+  id          String       @id @default(uuid()) @db.Uuid
+  storeId     String       @db.Uuid
+  warehouseId String       @db.Uuid // kassa qaysi ombordan sotadi
+  name        String
+  code        String
+  status      EntityStatus @default(ACTIVE)
+  maxCashiers Int          @default(1) // bir vaqtda nechta kassir smena ocha oladi
+  createdAt   DateTime     @default(now())
+
+  store       Store                @relation(fields: [storeId], references: [id])
+  warehouse   Warehouse            @relation(fields: [warehouseId], references: [id])
+  shifts      Shift[]
+  sales       Sale[]
+  assignments RegisterAssignment[]
+
+  @@unique([storeId, code])
+}
+
+/// Kassaga biriktirilgan xodimlar. Ro‘yxat bo‘sh bo‘lsa — kassada istalgan kassir ishlay oladi.
+model RegisterAssignment {
+  registerId String   @db.Uuid
+  userId     String   @db.Uuid
+  createdAt  DateTime @default(now())
+
+  register Register @relation(fields: [registerId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([registerId, userId])
+  @@index([userId])
+}
+
+// ───────────── Katalog ─────────────
+
+model Category {
+  id        String   @id @default(uuid()) @db.Uuid
+  storeId   String   @db.Uuid
+  name      String
+  createdAt DateTime @default(now())
+
+  store    Store     @relation(fields: [storeId], references: [id])
+  products Product[]
+
+  @@unique([storeId, name])
+}
+
+enum Unit {
+  PIECE // dona
+  KG
+  LITER
+  BOX // quti
+  METER
+}
+
+model Product {
+  id             String   @id @default(uuid()) @db.Uuid
+  storeId        String   @db.Uuid
+  categoryId     String?  @db.Uuid
+  name           String
+  normalizedName String // qidiruv uchun lower-case
+  sku            String?
+  unit           Unit     @default(PIECE)
+  costPrice      Decimal  @default(0) @db.Decimal(14, 2)
+  salePrice      Decimal  @db.Decimal(14, 2)
+  minStock       Decimal  @default(0) @db.Decimal(14, 3)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  store     Store           @relation(fields: [storeId], references: [id])
+  category  Category?       @relation(fields: [categoryId], references: [id])
+  barcodes  Barcode[]
+  balances  StockBalance[]
+  movements StockMovement[]
+  saleItems SaleItem[]
+
+  @@unique([storeId, sku])
+  @@index([storeId, normalizedName])
+}
+
+model Barcode {
+  id        String @id @default(uuid()) @db.Uuid
+  storeId   String @db.Uuid
+  productId String @db.Uuid
+  value     String
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([storeId, value]) // barcode do'kon doirasida noyob
+  @@index([productId])
+}
+
+// ───────────── Ombor ─────────────
+
+model StockBalance {
+  warehouseId String   @db.Uuid
+  productId   String   @db.Uuid
+  qty         Decimal  @default(0) @db.Decimal(14, 3)
+  version     Int      @default(0) // optimistik concurrency
+  updatedAt   DateTime @updatedAt
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+  product   Product   @relation(fields: [productId], references: [id])
+
+  @@id([warehouseId, productId])
+}
+
+enum StockMovementType {
+  PURCHASE_IN
+  SALE_OUT
+  REFUND_IN
+  ADJUSTMENT
+  TRANSFER_IN
+  TRANSFER_OUT
+  WRITE_OFF
+}
+
+model StockMovement {
+  id            String            @id @default(uuid()) @db.Uuid
+  warehouseId   String            @db.Uuid
+  productId     String            @db.Uuid
+  type          StockMovementType
+  qty           Decimal           @db.Decimal(14, 3) // ishorali: + kirim, - chiqim
+  balanceAfter  Decimal           @db.Decimal(14, 3)
+  reason        String?
+  referenceType String? // Sale | Refund | Adjustment ...
+  referenceId   String?           @db.Uuid
+  actorId       String            @db.Uuid
+  createdAt     DateTime          @default(now())
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+  product   Product   @relation(fields: [productId], references: [id])
+
+  @@index([warehouseId, productId, createdAt])
+  @@index([referenceType, referenceId])
+}
+
+// ───────────── Xaridorlar ─────────────
+
+model Customer {
+  id              String   @id @default(uuid()) @db.Uuid
+  storeId         String   @db.Uuid
+  name            String
+  phone           String?
+  normalizedPhone String?
+  address         String?
+  notes           String?
+  createdById     String   @db.Uuid
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  store Store  @relation(fields: [storeId], references: [id])
+  sales Sale[]
+
+  @@index([storeId, normalizedPhone])
+  @@index([storeId, name])
+}
+
+// ───────────── Smena va kassa ─────────────
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+model Shift {
+  id           String      @id @default(uuid()) @db.Uuid
+  storeId      String      @db.Uuid
+  registerId   String      @db.Uuid
+  cashierId    String      @db.Uuid
+  status       ShiftStatus @default(OPEN)
+  openingCash  Decimal     @db.Decimal(14, 2)
+  expectedCash Decimal?    @db.Decimal(14, 2)
+  countedCash  Decimal?    @db.Decimal(14, 2)
+  difference   Decimal?    @db.Decimal(14, 2)
+  openedAt     DateTime    @default(now())
+  closedAt     DateTime?
+
+  register      Register       @relation(fields: [registerId], references: [id])
+  sales         Sale[]
+  cashMovements CashMovement[]
+
+  @@index([registerId, status])
+  @@index([cashierId, openedAt])
+}
+
+enum CashMovementType {
+  CASH_IN
+  CASH_OUT
+}
+
+model CashMovement {
+  id        String           @id @default(uuid()) @db.Uuid
+  shiftId   String           @db.Uuid
+  type      CashMovementType
+  amount    Decimal          @db.Decimal(14, 2)
+  reason    String
+  actorId   String           @db.Uuid
+  createdAt DateTime         @default(now())
+
+  shift Shift @relation(fields: [shiftId], references: [id])
+
+  @@index([shiftId])
+}
+
+// ───────────── Sotuv ─────────────
+
+enum SaleStatus {
+  COMPLETED
+  PARTIALLY_REFUNDED
+  REFUNDED
+  VOIDED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD // faqat to'lov usuli qaydi, bank tasdig'i emas
+}
+
+/// Karta to'lovi turi (faqat qayd uchun; karta raqami saqlanmaydi)
+enum CardType {
+  UZCARD
+  HUMO
+  VISA
+  MASTERCARD
+  UNIONPAY
+  OTHER
+}
+
+model Sale {
+  id             String     @id @default(uuid()) @db.Uuid
+  storeId        String     @db.Uuid
+  receiptNo      String
+  registerId     String     @db.Uuid
+  shiftId        String     @db.Uuid
+  cashierId      String     @db.Uuid
+  customerId     String?    @db.Uuid
+  customerName   String? // snapshot
+  status         SaleStatus @default(COMPLETED)
+  subtotal       Decimal    @db.Decimal(14, 2)
+  discountTotal  Decimal    @default(0) @db.Decimal(14, 2)
+  total          Decimal    @db.Decimal(14, 2)
+  refundedTotal  Decimal    @default(0) @db.Decimal(14, 2)
+  idempotencyKey String
+  voidReason     String?
+  voidedById     String?    @db.Uuid
+  voidedAt       DateTime?
+  createdAt      DateTime   @default(now())
+
+  store    Store      @relation(fields: [storeId], references: [id])
+  register Register   @relation(fields: [registerId], references: [id])
+  shift    Shift      @relation(fields: [shiftId], references: [id])
+  customer Customer?  @relation(fields: [customerId], references: [id])
+  items    SaleItem[]
+  payments Payment[]
+  refunds  Refund[]
+
+  @@unique([storeId, receiptNo])
+  @@unique([storeId, idempotencyKey])
+  @@index([storeId, createdAt])
+  @@index([cashierId])
+  @@index([customerId])
+  @@index([status])
+}
+
+model SaleItem {
+  id           String  @id @default(uuid()) @db.Uuid
+  saleId       String  @db.Uuid
+  productId    String  @db.Uuid
+  nameSnapshot String
+  skuSnapshot  String?
+  qty          Decimal @db.Decimal(14, 3)
+  refundedQty  Decimal @default(0) @db.Decimal(14, 3)
+  unitPrice    Decimal @db.Decimal(14, 2)
+  discount     Decimal @default(0) @db.Decimal(14, 2) // satr chegirmasi (summa)
+  costSnapshot Decimal @db.Decimal(14, 2)
+  lineTotal    Decimal @db.Decimal(14, 2)
+
+  sale        Sale         @relation(fields: [saleId], references: [id])
+  product     Product      @relation(fields: [productId], references: [id])
+  refundItems RefundItem[]
+
+  @@index([saleId])
+  @@index([productId])
+}
+
+model Payment {
+  id                String        @id @default(uuid()) @db.Uuid
+  saleId            String        @db.Uuid
+  method            PaymentMethod
+  amount            Decimal       @db.Decimal(14, 2) // chekka hisoblangan summa
+  tendered          Decimal?      @db.Decimal(14, 2) // naqd: qabul qilingan
+  change            Decimal?      @db.Decimal(14, 2) // naqd: qaytim
+  cardType          CardType? // karta: Uzcard, Humo, Visa...
+  externalReference String? // karta: terminal chek raqami (ixtiyoriy)
+  createdAt         DateTime      @default(now())
+
+  sale Sale @relation(fields: [saleId], references: [id])
+
+  @@index([saleId])
+}
+
+enum RefundDisposition {
+  RESTOCK // omborga qaytarish
+  WRITE_OFF // yaroqsiz
+}
+
+model Refund {
+  id          String            @id @default(uuid()) @db.Uuid
+  saleId      String            @db.Uuid
+  shiftId     String?           @db.Uuid
+  reason      String
+  disposition RefundDisposition
+  method      PaymentMethod
+  amount      Decimal           @db.Decimal(14, 2)
+  actorId     String            @db.Uuid
+  createdAt   DateTime          @default(now())
+
+  sale  Sale         @relation(fields: [saleId], references: [id])
+  items RefundItem[]
+
+  @@index([saleId])
+  @@index([createdAt])
+}
+
+model RefundItem {
+  id         String  @id @default(uuid()) @db.Uuid
+  refundId   String  @db.Uuid
+  saleItemId String  @db.Uuid
+  qty        Decimal @db.Decimal(14, 3)
+  amount     Decimal @db.Decimal(14, 2)
+
+  refund   Refund   @relation(fields: [refundId], references: [id])
+  saleItem SaleItem @relation(fields: [saleItemId], references: [id])
+}
+
+// ───────────── Audit ─────────────
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  storeId    String?  @db.Uuid
+  actorId    String?  @db.Uuid
+  action     String // masalan: product.price_changed
+  entityType String?
+  entityId   String?
+  metadata   Json     @default("{}") // parol, token, karta ma'lumoti YOZILMAYDI
+  requestId  String?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  store Store? @relation(fields: [storeId], references: [id])
+
+  @@index([createdAt])
+  @@index([actorId])
+  @@index([entityType, entityId])
+}
+
+// ───────────── Landing ─────────────
+
+model DemoRequest {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  phone     String
+  storeName String
+  storeType String?
+  message   String?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
