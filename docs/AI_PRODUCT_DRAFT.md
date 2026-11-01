@@ -1,6 +1,6 @@
 # AI orqali mahsulot qo‘shish — API shartnomasi
 
-Foydalanuvchi 1–5 ta mahsulot rasmini yuboradi → backend Claude (vision) orqali rasmlarni tahlil qiladi →
+Foydalanuvchi 1–5 ta mahsulot rasmini yuboradi → backend AI (Gemini, OpenRouter yoki Claude — `AI_PROVIDER`) orqali rasmlarni tahlil qiladi →
 **bazaga hech narsa yozmasdan** mahsulot qoralamalari ro‘yxatini qaytaradi → frontend ro‘yxatni ko‘rsatadi,
 foydalanuvchi tahrirlab tasdiqlaydi → frontend mavjud `POST /api/v1/products` (va kerak bo‘lsa
 `POST /api/v1/categories`) orqali yaratadi.
@@ -56,11 +56,22 @@ Bir xil mahsulot bir nechta rasmda bo‘lsa — **bitta** qoralama. Rasmda mahsu
 | Holat | Status | message |
 |---|---|---|
 | Rasm yo‘q / 5 tadan ko‘p / turi noto‘g‘ri / 5 MB dan katta | 400 | aniq sabab |
-| `ANTHROPIC_API_KEY` sozlanmagan (va mock o‘chiq) | 503 | "AI xizmati sozlanmagan. Administrator ANTHROPIC_API_KEY ni qo‘shishi kerak." |
-| Claude rad etdi (`stop_reason: refusal`) | 422 | "AI bu rasmlarni tahlil qila olmadi. Boshqa rasm yuboring." |
-| Claude API xatosi (429/5xx/tarmoq) | 502 | "AI xizmati vaqtincha javob bermayapti. Birozdan keyin qayta urinib ko‘ring." |
+| AI kaliti sozlanmagan (va mock o‘chiq) | 503 | "AI xizmati sozlanmagan. …" |
+| Kalit noto‘g‘ri / hisobda mablag‘ yo‘q (401/402/403) | 503 | "AI kaliti noto‘g‘ri yoki hisobda mablag‘ yo‘q. …" |
+| AI rad etdi (refusal / content_filter / bo‘sh javob) | 422 | "AI bu rasmlarni tahlil qila olmadi. Boshqa rasm yuboring." |
+| AI API xatosi (429/5xx/tarmoq/JSON sxemaga mos emas) | 502 | "AI xizmati vaqtincha javob bermayapti. Birozdan keyin qayta urinib ko‘ring." |
 
 ### Lokal sinov rejimi
 
-`AI_PRODUCT_DRAFT_MOCK=1` **va** `NODE_ENV !== 'production'` bo‘lsa — Claude chaqirilmaydi, 1.5 s kutib,
+`AI_PRODUCT_DRAFT_MOCK=1` **va** `NODE_ENV !== 'production'` bo‘lsa — AI chaqirilmaydi, 1.5 s kutib,
 2 ta namunaviy qoralama qaytariladi (bittasida `salePrice: null`, bittasida `newCategoryName`). Faqat UI ni kalitsiz sinash uchun.
+
+## Provayderlar (`backend/.env`)
+
+| `AI_PROVIDER` | Kalit | Model | Qanday chaqiriladi |
+|---|---|---|---|
+| `gemini` | `GEMINI_API_KEY` | `GEMINI_MODEL` (standart `gemini-3.8-flash`) | `@google/genai` `models.generateContent`, `responseJsonSchema` |
+| `openrouter` | `OPENROUTER_API_KEY` | `OPENROUTER_MODEL` (majburiy, vision + structured outputs) | `POST https://openrouter.ai/api/v1/chat/completions`, `response_format: json_schema`, `provider.require_parameters` |
+| `claude` | `ANTHROPIC_API_KEY` | `ANTHROPIC_MODEL` (standart `claude-opus-5-5`) | `@anthropic-ai/sdk` `messages.parse` + zod |
+
+`AI_PROVIDER` bo‘sh bo‘lsa — kaliti bor birinchisi (gemini → openrouter → claude). Javob har doim zod sxemasi bilan tekshiriladi.

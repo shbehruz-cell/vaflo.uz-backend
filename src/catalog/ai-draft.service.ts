@@ -8,16 +8,32 @@ import {
 } from '@nestjs/common';
 import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
+import { ApiError as GeminiApiError, GoogleGenAI } from '@google/genai';
 import { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AuthUser } from '../common/auth/auth-user.js';
 
-const MODEL = 'claude-opus-5-5';
+/**
+ * AI provayderi `.env` orqali tanlanadi:
+ *   AI_PROVIDER=gemini | openrouter | claude   (bo‘sh bo‘lsa — kaliti bor birinchisi: gemini → openrouter → claude)
+ *   GEMINI_API_KEY,     GEMINI_MODEL     (standart: gemini-3.8-flash)
+ *   OPENROUTER_API_KEY, OPENROUTER_MODEL (majburiy: rasm + structured outputs qo‘llaydigan model, masalan google/... yoki anthropic/...)
+ *   ANTHROPIC_API_KEY,  ANTHROPIC_MODEL  (standart: claude-opus-5-5)
+ */
+type Provider = 'gemini' | 'openrouter' | 'claude';
+
+const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
+const DEFAULT_CLAUDE_MODEL = 'claude-opus-5-5';
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const REQUEST_TIMEOUT_MS = 90_000;
+
 const MAX_IMAGES = 5;
 const ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] as const;
 type AllowedMime = (typeof ALLOWED_MIME)[number];
 
-const MSG_NOT_CONFIGURED = 'AI xizmati sozlanmagan. Administrator ANTHROPIC_API_KEY ni qo‘shishi kerak.';
+const MSG_NOT_CONFIGURED =
+  'AI xizmati sozlanmagan. Administrator .env faylida GEMINI_API_KEY, OPENROUTER_API_KEY yoki ANTHROPIC_API_KEY ni qo‘shishi kerak.';
+const MSG_KEY_REJECTED = 'AI kaliti noto‘g‘ri yoki hisobda mablag‘ yo‘q. Administrator .env dagi kalitni tekshirsin.';
 const MSG_REFUSED = 'AI bu rasmlarni tahlil qila olmadi. Boshqa rasm yuboring.';
 const MSG_UNAVAILABLE = 'AI xizmati vaqtincha javob bermayapti. Birozdan keyin qayta urinib ko‘ring.';
 
@@ -40,6 +56,13 @@ const DraftSchema = z.object({
     }),
   ),
 });
+type DraftOutput = z.infer<typeof DraftSchema>;
+
+/** Gemini/OpenRouter uchun oddiy JSON Schema (zod’dan). `$schema` kaliti olib tashlanadi. */
+const DRAFT_JSON_SCHEMA = (() => {
+  const { $schema: _ignored, ...rest } = z.toJSONSchema(DraftSchema) as Record<string, unknown>;
+  return rest;
+})();
 
 export interface ProductDraft {
   name: string;
@@ -70,12 +93,19 @@ Rules:
 - categoryId: pick the id of the best matching category from the provided list. If none fits, set categoryId to null and propose newCategoryName (a short Uzbek name). Never set both.
 - confidence (high/medium/low) reflects how certain you are about the identification.
 - notes: mention what the user should double-check (e.g. unreadable size), or null.
-- If no products are visible, return an empty drafts list.`;
+- If no products are visible, return an empty drafts list.
+- Respond with JSON only, matching the requested schema.`;
+
+interface ImageInput {
+  mime: AllowedMime;
+  b64: string;
+}
 
 @Injectable()
 export class AiDraftService {
   private readonly logger = new Logger(AiDraftService.name);
-  private client: Anthropic | null = null;
+  private claude: Anthropic | null = null;
+  private gemini: GoogleGenAI | null = null;
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -92,11 +122,11 @@ export class AiDraftService {
     const isProd = process.env.NODE_ENV === 'production';
     if (process.env.AI_PRODUCT_DRAFT_MOCK === '1' && !isProd) {
       await new Promise((r) => setTimeout(r, 1500));
-      return { drafts: this.mockDrafts(files.length), model: MODEL };
+      return { drafts: this.mockDrafts(files.length), model: 'mock' };
     }
 
-    const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
-    if (!apiKey) throw new ServiceUnavailableException(MSG_NOT_CONFIGURED);
+    const provider = this.resolveProvider();
+    if (!provider) throw new ServiceUnavailableException(MSG_NOT_CONFIGURED);
 
     const categories = await this.prisma.category.findMany({
       where: { storeId: user.storeId },
@@ -104,24 +134,165 @@ export class AiDraftService {
       orderBy: { name: 'asc' },
     });
 
-    this.client ??= new Anthropic({ apiKey });
+    const images: ImageInput[] = files.map((f) => ({ mime: f.mimetype as AllowedMime, b64: f.buffer.toString('base64') }));
+    const userText =
+      `Photos sent: ${files.length} (indexes 0..${files.length - 1}).\n` +
+      `Existing categories (JSON): ${JSON.stringify(categories)}\n` +
+      'Return the product drafts.';
 
-    const content: Anthropic.ContentBlockParam[] = files.map((f) => ({
-      type: 'image' as const,
-      source: { type: 'base64' as const, media_type: f.mimetype as AllowedMime, data: f.buffer.toString('base64') },
-    }));
-    content.push({
-      type: 'text',
-      text:
-        `Photos sent: ${files.length} (indexes 0..${files.length - 1}).\n` +
-        `Existing categories (JSON): ${JSON.stringify(categories)}\n` +
-        'Return the product drafts.',
-    });
+    let result: { output: DraftOutput; model: string };
+    switch (provider) {
+      case 'gemini':
+        result = await this.callGemini(images, userText);
+        break;
+      case 'openrouter':
+        result = await this.callOpenRouter(images, userText);
+        break;
+      case 'claude':
+        result = await this.callClaude(images, userText);
+        break;
+    }
 
-    let parsed: z.infer<typeof DraftSchema> | null;
+    return { drafts: this.normalize(result.output.drafts, categories, files.length), model: result.model };
+  }
+
+  /** AI_PROVIDER aniq ko‘rsatilgan bo‘lsa — o‘sha (kaliti bo‘lmasa null); aks holda kaliti bor birinchisi. */
+  private resolveProvider(): Provider | null {
+    const has: Record<Provider, boolean> = {
+      gemini: !!process.env.GEMINI_API_KEY?.trim(),
+      openrouter: !!process.env.OPENROUTER_API_KEY?.trim(),
+      claude: !!process.env.ANTHROPIC_API_KEY?.trim(),
+    };
+    const wanted = process.env.AI_PROVIDER?.trim().toLowerCase();
+    if (wanted === 'gemini' || wanted === 'openrouter' || wanted === 'claude') return has[wanted] ? wanted : null;
+    return (['gemini', 'openrouter', 'claude'] as const).find((p) => has[p]) ?? null;
+  }
+
+  // ---------- Gemini (@google/genai) ----------
+
+  private async callGemini(images: ImageInput[], userText: string): Promise<{ output: DraftOutput; model: string }> {
+    const model = process.env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
+    this.gemini ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY!.trim() });
+
+    const parts = [...images.map((i) => ({ inlineData: { mimeType: i.mime, data: i.b64 } })), { text: userText }];
+    let text: string | undefined;
     try {
-      const response = await this.client.messages.parse({
-        model: MODEL,
+      const response = await this.gemini.models.generateContent({
+        model,
+        contents: [{ role: 'user', parts }],
+        config: {
+          systemInstruction: SYSTEM_PROMPT,
+          responseMimeType: 'application/json',
+          responseJsonSchema: DRAFT_JSON_SCHEMA,
+          maxOutputTokens: 8192,
+        },
+      });
+      text = response.text;
+      if (!text) {
+        // Javob bo‘sh — odatda xavfsizlik filtri to‘xtatgan
+        this.logger.warn(`Gemini bo‘sh javob: ${JSON.stringify(response.promptFeedback ?? response.candidates?.[0]?.finishReason ?? null)}`);
+        throw new UnprocessableEntityException(MSG_REFUSED);
+      }
+    } catch (e) {
+      if (e instanceof UnprocessableEntityException) throw e;
+      if (e instanceof GeminiApiError) {
+        this.logger.error(`Gemini xatosi (${e.status}): ${e.message}`);
+        if (e.status === 401 || e.status === 403) throw new ServiceUnavailableException(MSG_KEY_REJECTED);
+        throw new BadGatewayException(MSG_UNAVAILABLE);
+      }
+      this.logger.error(`Gemini kutilmagan xato: ${e instanceof Error ? e.message : String(e)}`);
+      throw new BadGatewayException(MSG_UNAVAILABLE);
+    }
+    return { output: this.parseJson(text, 'Gemini'), model };
+  }
+
+  // ---------- OpenRouter (OpenAI-mos HTTP API) ----------
+
+  private async callOpenRouter(images: ImageInput[], userText: string): Promise<{ output: DraftOutput; model: string }> {
+    const model = process.env.OPENROUTER_MODEL?.trim();
+    if (!model) {
+      throw new ServiceUnavailableException(
+        'OPENROUTER_MODEL ko‘rsatilmagan. .env ga rasm va structured outputs qo‘llaydigan model nomini yozing.',
+      );
+    }
+
+    let res: Response;
+    try {
+      res = await fetch(OPENROUTER_URL, {
+        method: 'POST',
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        headers: {
+          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY!.trim()}`,
+          'Content-Type': 'application/json',
+          'X-Title': 'VAFLO.UZ',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 8192,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            {
+              role: 'user',
+              content: [
+                ...images.map((i) => ({ type: 'image_url', image_url: { url: `data:${i.mime};base64,${i.b64}` } })),
+                { type: 'text', text: userText },
+              ],
+            },
+          ],
+          response_format: {
+            type: 'json_schema',
+            json_schema: { name: 'product_drafts', strict: true, schema: DRAFT_JSON_SCHEMA },
+          },
+          // Faqat structured outputs’ni qo‘llaydigan provayderlarga yo‘naltirish
+          provider: { require_parameters: true },
+        }),
+      });
+    } catch (e) {
+      this.logger.error(`OpenRouter tarmoq xatosi: ${e instanceof Error ? e.message : String(e)}`);
+      throw new BadGatewayException(MSG_UNAVAILABLE);
+    }
+
+    const body = (await res.json().catch(() => null)) as {
+      choices?: { message?: { content?: string | null }; finish_reason?: string; error?: { code: number; message: string } }[];
+      error?: { code?: number; message?: string };
+    } | null;
+
+    if (!res.ok) {
+      this.logger.error(`OpenRouter xatosi (${res.status}): ${body?.error?.message ?? 'javob yo‘q'}`);
+      if (res.status === 401 || res.status === 402 || res.status === 403) throw new ServiceUnavailableException(MSG_KEY_REJECTED);
+      throw new BadGatewayException(MSG_UNAVAILABLE);
+    }
+
+    const choice = body?.choices?.[0];
+    if (choice?.error) {
+      this.logger.error(`OpenRouter model xatosi (${choice.error.code}): ${choice.error.message}`);
+      throw new BadGatewayException(MSG_UNAVAILABLE);
+    }
+    if (choice?.finish_reason === 'content_filter') throw new UnprocessableEntityException(MSG_REFUSED);
+    const text = choice?.message?.content;
+    if (!text) {
+      this.logger.error(`OpenRouter bo‘sh javob (finish_reason: ${choice?.finish_reason ?? '—'})`);
+      throw new BadGatewayException(MSG_UNAVAILABLE);
+    }
+    return { output: this.parseJson(text, 'OpenRouter'), model };
+  }
+
+  // ---------- Claude (@anthropic-ai/sdk) ----------
+
+  private async callClaude(images: ImageInput[], userText: string): Promise<{ output: DraftOutput; model: string }> {
+    const model = process.env.ANTHROPIC_MODEL?.trim() || DEFAULT_CLAUDE_MODEL;
+    this.claude ??= new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY!.trim() });
+
+    const content: Anthropic.ContentBlockParam[] = images.map((i) => ({
+      type: 'image' as const,
+      source: { type: 'base64' as const, media_type: i.mime, data: i.b64 },
+    }));
+    content.push({ type: 'text', text: userText });
+
+    let parsed: DraftOutput | null;
+    try {
+      const response = await this.claude.messages.parse({
+        model,
         max_tokens: 16000,
         output_config: { effort: 'medium', format: zodOutputFormat(DraftSchema) },
         system: SYSTEM_PROMPT,
@@ -131,28 +302,49 @@ export class AiDraftService {
       parsed = response.parsed_output;
     } catch (e) {
       if (e instanceof UnprocessableEntityException) throw e;
-      if (e instanceof Anthropic.AuthenticationError) {
-        this.logger.error(`Anthropic autentifikatsiya xatosi (${e.status}): ${e.message}`);
-        throw new ServiceUnavailableException(MSG_NOT_CONFIGURED);
+      if (e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) {
+        this.logger.error(`Anthropic kalit xatosi (${e.status}): ${e.message}`);
+        throw new ServiceUnavailableException(MSG_KEY_REJECTED);
       }
       if (e instanceof Anthropic.RateLimitError || e instanceof Anthropic.APIConnectionError || e instanceof Anthropic.APIError) {
         this.logger.error(`Anthropic xatosi: ${e.constructor.name}: ${e.message}`);
         throw new BadGatewayException(MSG_UNAVAILABLE);
       }
-      this.logger.error(`AI qoralama kutilmagan xato: ${e instanceof Error ? e.message : String(e)}`);
+      this.logger.error(`Anthropic kutilmagan xato: ${e instanceof Error ? e.message : String(e)}`);
       throw new BadGatewayException(MSG_UNAVAILABLE);
     }
-
     if (!parsed) {
       this.logger.error('Anthropic javobi parse qilinmadi (parsed_output null)');
       throw new BadGatewayException(MSG_UNAVAILABLE);
     }
+    return { output: parsed, model };
+  }
 
-    return { drafts: this.normalize(parsed.drafts, categories, files.length), model: MODEL };
+  // ---------- Umumiy ----------
+
+  /** Model qaytargan JSON matnni sxema bo‘yicha tekshiradi (ba’zan ```json ... ``` ichida keladi). */
+  private parseJson(text: string, source: string): DraftOutput {
+    const cleaned = text
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '');
+    let data: unknown;
+    try {
+      data = JSON.parse(cleaned);
+    } catch {
+      this.logger.error(`${source}: javob JSON emas`);
+      throw new BadGatewayException(MSG_UNAVAILABLE);
+    }
+    const r = DraftSchema.safeParse(data);
+    if (!r.success) {
+      this.logger.error(`${source}: javob sxemaga mos emas: ${r.error.message.slice(0, 500)}`);
+      throw new BadGatewayException(MSG_UNAVAILABLE);
+    }
+    return r.data;
   }
 
   private normalize(
-    raw: z.infer<typeof DraftSchema>['drafts'],
+    raw: DraftOutput['drafts'],
     categories: { id: string; name: string }[],
     imageCount: number,
   ): ProductDraft[] {
