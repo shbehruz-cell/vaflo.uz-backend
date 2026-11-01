@@ -42,12 +42,16 @@ foydalanuvchi tahrirlab tasdiqlaydi → frontend mavjud `POST /api/v1/products` 
 | `description` | string \| null | Qisqa (≤ 200 belgi). |
 | `unit` | `PIECE \| KG \| LITER \| BOX \| METER` | Odatda qadoqlangan mahsulot — `PIECE`; tarozida sotiladigan — `KG`. |
 | `salePrice` | string \| null | Faqat rasmda narx yorlig‘i **aniq ko‘rinsa**, so‘mda, `"12500.00"` formatida. Aks holda `null` (taxmin qilinmaydi). |
+| `costPrice` | string \| null | Tannarx — faqat yozilgan bo‘lsa (narx ro‘yxatidagi "tannarx/kelish narxi" ustuni), `"8000.00"`. |
+| `initialQty` | string \| null | Boshlang‘ich qoldiq — faqat yozilgan bo‘lsa ("soni/miqdori/qoldiq" ustuni), `"24"` yoki `"1.5"`. |
 | `barcode` | string \| null | Faqat shtrix-kod raqamlari **aniq o‘qilsa** (8–14 raqam). Aks holda `null`. |
 | `categoryId` | uuid \| null | Do‘konning mavjud kategoriyalaridan mosi bo‘lsa. |
 | `newCategoryName` | string \| null | Mos kategoriya yo‘q bo‘lsa — taklif qilinadigan yangi nom (aks holda `null`). `categoryId` bilan bir vaqtda to‘ldirilmaydi. |
 | `confidence` | `high \| medium \| low` | Mahsulotni aniqlash ishonchi. |
 | `imageIndexes` | number[] | Mahsulot qaysi rasmlarda ko‘rinadi (0 dan). |
 | `notes` | string \| null | Foydalanuvchi tekshirishi kerak bo‘lgan narsa (masalan "hajmi ko‘rinmadi"). |
+
+Qog‘ozdagi narx ro‘yxati: har qator — bitta mahsulot; ustun sarlavhasi (nomi, narxi, tannarx, soni…) bo‘yicha maydon aniqlanadi; sarlavha bo‘lmasa matn + son = nom + sotuv narxi.
 
 Bir xil mahsulot bir nechta rasmda bo‘lsa — **bitta** qoralama. Rasmda mahsulot bo‘lmasa — `drafts: []`.
 

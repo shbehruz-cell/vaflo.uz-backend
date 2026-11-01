@@ -47,6 +47,8 @@ const DraftSchema = z.object({
       description: z.string().nullable(),
       unit: z.enum(UNITS),
       salePrice: z.string().nullable(),
+      costPrice: z.string().nullable(),
+      initialQty: z.string().nullable(),
       barcode: z.string().nullable(),
       categoryId: z.string().nullable(),
       newCategoryName: z.string().nullable(),
@@ -69,6 +71,8 @@ export interface ProductDraft {
   description: string | null;
   unit: (typeof UNITS)[number];
   salePrice: string | null;
+  costPrice: string | null;
+  initialQty: string | null;
   barcode: string | null;
   categoryId: string | null;
   newCategoryName: string | null;
@@ -82,19 +86,31 @@ export interface AiDraftResult {
   model: string;
 }
 
-const SYSTEM_PROMPT = `You are a product-catalog assistant for a small retail shop in Uzbekistan. The user sends 1-5 photos of products (shelves, packages, price tags). Produce draft catalog entries.
+const SYSTEM_PROMPT = `You are a product-catalog assistant for a small retail shop in Uzbekistan. The user sends 1-5 photos: product packages, shelves, price tags, or (very often) a paper/notebook/printed PRICE LIST, handwritten or printed. Produce draft catalog entries.
+
+Price lists and tables (most important case):
+- Each row is one product. Read every row; do not skip or merge rows.
+- If the columns have headers, map each column by its header (Uzbek, Russian or English, any spelling): "nomi/nomlanishi/mahsulot/tovar/наименование/товар/name" -> name; "narxi/sotuv narxi/sotish/цена/розница/price" -> salePrice; "tannarx/kelish narxi/olish narxi/xarid/себестоимость/закуп/опт/cost" -> costPrice; "soni/miqdori/qoldiq/dona/кол-во/количество/qty" -> initialQty; "shtrix/kod/штрихкод/barcode" -> barcode; "birlik/ед./unit" -> unit. Ignore columns you cannot map (row numbers, sums/"jami/сумма", dates).
+- If there are NO headers, a row with a text and one number means name + salePrice. With two numbers and no headers, the larger is normally salePrice and the smaller costPrice only if that is clearly the pattern of the whole list; otherwise treat the single most price-like number as salePrice and mention the other in notes.
+- Numbers like "12 500", "12.500", "12,5 ming", "12.5k" mean 12500 so‘m. Write prices as plain digits ("12500").
 
 Rules:
 - Identify each distinct sellable product across ALL photos. If the same product appears in several photos, return ONE draft and list every photo index (0-based, in the order sent) in imageIndexes.
 - name: brand + product type + size/weight exactly as printed (e.g. "Coca-Cola 1.5 l"). Keep brand names as printed. Max 200 characters.
 - All text you write (name, description, notes, newCategoryName) must be in Uzbek, Latin script, using the apostrophes ‘ and ’ (o‘, g‘, ma’lumot). description: short, at most 200 characters, or null.
 - unit: PIECE for packaged goods; KG for loose/weighed goods; LITER only for loose liquids sold by volume; BOX for multi-packs sold as a box; METER only for goods sold by length.
-- NEVER guess prices or barcodes. salePrice only if a price tag is clearly legible: digits only in Uzbek so‘m, e.g. "12500" or "12500.00". barcode only if all digits (8-14) are clearly legible. Otherwise null.
+- NEVER guess prices, quantities or barcodes. salePrice / costPrice only when written (price tag or list column): digits only in Uzbek so‘m, e.g. "12500". initialQty only when a quantity/stock column or note is written (digits, e.g. "24" or "1.5"). barcode only if all digits (8-14) are clearly legible. Otherwise null.
 - categoryId: pick the id of the best matching category from the provided list. If none fits, set categoryId to null and propose newCategoryName (a short Uzbek name). Never set both.
 - confidence (high/medium/low) reflects how certain you are about the identification.
 - notes: mention what the user should double-check (e.g. unreadable size), or null.
 - If no products are visible, return an empty drafts list.
 - Respond with JSON only, matching the requested schema.`;
+
+/** "12 500", "12500.5" → "12500.00"; boshqasi → null. */
+function money(v: string | null): string | null {
+  const s = v?.trim().replace(/\s/g, '') ?? '';
+  return /^\d+(\.\d{1,2})?$/.test(s) && Number(s) > 0 ? Number(s).toFixed(2) : null;
+}
 
 interface ImageInput {
   mime: AllowedMime;
@@ -354,9 +370,10 @@ export class AiDraftService {
       const name = d.name.trim().slice(0, 200);
       if (!name) continue;
 
-      let salePrice: string | null = null;
-      const price = d.salePrice?.trim().replace(/\s/g, '') ?? '';
-      if (/^\d+(\.\d{1,2})?$/.test(price)) salePrice = Number(price).toFixed(2);
+      const salePrice = money(d.salePrice);
+      const costPrice = money(d.costPrice);
+      const qtyRaw = d.initialQty?.trim().replace(/\s/g, '').replace(',', '.') ?? '';
+      const initialQty = /^\d+(\.\d{1,3})?$/.test(qtyRaw) && Number(qtyRaw) > 0 ? String(Number(qtyRaw)) : null;
 
       const bc = d.barcode?.trim() ?? '';
       const barcode = /^\d{8,14}$/.test(bc) ? bc : null;
@@ -373,6 +390,8 @@ export class AiDraftService {
         description: d.description?.trim().slice(0, 200) || null,
         unit: d.unit,
         salePrice,
+        costPrice,
+        initialQty,
         barcode,
         categoryId,
         newCategoryName,
@@ -391,6 +410,8 @@ export class AiDraftService {
         description: 'Gazlangan ichimlik, plastik shisha',
         unit: 'PIECE',
         salePrice: null,
+        costPrice: '9500.00',
+        initialQty: '24',
         barcode: null,
         categoryId: null,
         newCategoryName: 'Ichimliklar',
@@ -403,6 +424,8 @@ export class AiDraftService {
         description: 'Kartoshka chipsi, smetana va ko‘kat ta’mi',
         unit: 'PIECE',
         salePrice: '14000.00',
+        costPrice: null,
+        initialQty: null,
         barcode: null,
         categoryId: null,
         newCategoryName: 'Gazaklar',
