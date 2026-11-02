@@ -74,7 +74,7 @@ Bir xil mahsulot bir nechta rasmda bo‘lsa — **bitta** qoralama. Rasmda mahsu
 
 | `AI_PROVIDER` | Kalit | Model | Qanday chaqiriladi |
 |---|---|---|---|
-| `gemini` | `GEMINI_API_KEY` | `GEMINI_MODEL` (standart `gemini-3.8-flash`) | `@google/genai` `models.generateContent`, `responseJsonSchema` |
+| `gemini` | `GEMINI_API_KEY` | `GEMINI_MODEL` (standart `gemini-3.5-flash`) | `@google/genai` `models.generateContent`, `responseJsonSchema` |
 | `openrouter` | `OPENROUTER_API_KEY` | `OPENROUTER_MODEL` (majburiy, vision + structured outputs) | `POST https://openrouter.ai/api/v1/chat/completions`, `response_format: json_schema`, `provider.require_parameters` |
 | `claude` | `ANTHROPIC_API_KEY` | `ANTHROPIC_MODEL` (standart `claude-opus-5-5`) | `@anthropic-ai/sdk` `messages.parse` + zod |
 

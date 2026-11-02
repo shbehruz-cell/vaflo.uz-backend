@@ -16,13 +16,13 @@ import type { AuthUser } from '../common/auth/auth-user.js';
 /**
  * AI provayderi `.env` orqali tanlanadi:
  *   AI_PROVIDER=gemini | openrouter | claude   (bo‘sh bo‘lsa — kaliti bor birinchisi: gemini → openrouter → claude)
- *   GEMINI_API_KEY,     GEMINI_MODEL     (standart: gemini-3.8-flash)
+ *   GEMINI_API_KEY,     GEMINI_MODEL     (standart: gemini-3.5-flash)
  *   OPENROUTER_API_KEY, OPENROUTER_MODEL (majburiy: rasm + structured outputs qo‘llaydigan model, masalan google/... yoki anthropic/...)
  *   ANTHROPIC_API_KEY,  ANTHROPIC_MODEL  (standart: claude-opus-5-5)
  */
 type Provider = 'gemini' | 'openrouter' | 'claude';
 
-const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
+const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash';
 const DEFAULT_CLAUDE_MODEL = 'claude-opus-5-5';
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const REQUEST_TIMEOUT_MS = 90_000;
@@ -86,24 +86,26 @@ export interface AiDraftResult {
   model: string;
 }
 
-const SYSTEM_PROMPT = `You are a product-catalog assistant for a small retail shop in Uzbekistan. The user sends 1-5 photos: product packages, shelves, price tags, or (very often) a paper/notebook/printed PRICE LIST, handwritten or printed. Produce draft catalog entries.
+const SYSTEM_PROMPT = `You turn photos of a shop's PRODUCT LIST into catalog entries. The shop is in Uzbekistan.
+The user photographs a list written on paper: a notebook page, a handwritten or printed list ("spiska"), an invoice or a supplier price list. It may be in Uzbek (Latin or Cyrillic), Russian or mixed, with abbreviations and crossed-out text. A long list can span several photos. Rarely the photo shows product packages or price tags instead — then make one entry per product.
 
-Price lists and tables (most important case):
-- Each row is one product. Read every row; do not skip or merge rows.
-- If the columns have headers, map each column by its header (Uzbek, Russian or English, any spelling): "nomi/nomlanishi/mahsulot/tovar/наименование/товар/name" -> name; "narxi/sotuv narxi/sotish/цена/розница/price" -> salePrice; "tannarx/kelish narxi/olish narxi/xarid/себестоимость/закуп/опт/cost" -> costPrice; "soni/miqdori/qoldiq/dona/кол-во/количество/qty" -> initialQty; "shtrix/kod/штрихкод/barcode" -> barcode; "birlik/ед./unit" -> unit. Ignore columns you cannot map (row numbers, sums/"jami/сумма", dates).
-- If there are NO headers, a row with a text and one number means name + salePrice. With two numbers and no headers, the larger is normally salePrice and the smaller costPrice only if that is clearly the pattern of the whole list; otherwise treat the single most price-like number as salePrice and mention the other in notes.
-- Numbers like "12 500", "12.500", "12,5 ming", "12.5k" mean 12500 so‘m. Write prices as plain digits ("12500").
+How to read the list:
+- Every row (line) that names a product is ONE entry. Read every row top to bottom, in order; do not skip, merge or invent rows. Skip titles, dates, totals ("jami", "итого", "сумма"), signatures and crossed-out rows.
+- If a header row names the columns, map each column by its header (any spelling or language): "nomi / nomlanishi / mahsulot / tovar / наименование / товар / name" -> name; "narxi / sotuv narxi / sotish / цена / розница / price" -> salePrice; "tannarx / kelish narxi / olish narxi / xarid / себестоимость / закуп / опт / cost" -> costPrice; "soni / miqdori / qoldiq / dona / кол-во / количество / qty" -> initialQty; "shtrix / kod / штрихкод / barcode" -> barcode; "birlik / o‘lchov / ед. / unit" -> unit. Ignore columns you cannot map (row numbers, row sums, dates).
+- If there is NO header: a row with a name and one number = name + salePrice. With two numbers, use the pattern of the whole list: a small integer next to "ta", "dona", "kg", "шт" is a quantity (initialQty); of two money amounts the larger is salePrice and the smaller costPrice. If the meaning of a number is unclear, put the most price-like one in salePrice and mention the rest in notes.
+- Money: "12 500", "12.500", "12,500", "12,5 ming", "12.5k", "12 500 so‘m" all mean 12500 so‘m. Write money as plain digits ("12500"). Quantities as digits ("24", "1.5").
+- If the same product appears in several photos (overlapping shots of a long list), return it ONCE and list every photo index (0-based, in the order sent) in imageIndexes.
 
-Rules:
-- Identify each distinct sellable product across ALL photos. If the same product appears in several photos, return ONE draft and list every photo index (0-based, in the order sent) in imageIndexes.
-- name: brand + product type + size/weight exactly as printed (e.g. "Coca-Cola 1.5 l"). Keep brand names as printed. Max 200 characters.
-- All text you write (name, description, notes, newCategoryName) must be in Uzbek, Latin script, using the apostrophes ‘ and ’ (o‘, g‘, ma’lumot). description: short, at most 200 characters, or null.
-- unit: PIECE for packaged goods; KG for loose/weighed goods; LITER only for loose liquids sold by volume; BOX for multi-packs sold as a box; METER only for goods sold by length.
-- NEVER guess prices, quantities or barcodes. salePrice / costPrice only when written (price tag or list column): digits only in Uzbek so‘m, e.g. "12500". initialQty only when a quantity/stock column or note is written (digits, e.g. "24" or "1.5"). barcode only if all digits (8-14) are clearly legible. Otherwise null.
-- categoryId: pick the id of the best matching category from the provided list. If none fits, set categoryId to null and propose newCategoryName (a short Uzbek name). Never set both.
-- confidence (high/medium/low) reflects how certain you are about the identification.
-- notes: mention what the user should double-check (e.g. unreadable size), or null.
-- If no products are visible, return an empty drafts list.
+Field rules:
+- name: the product as written in the list, with obvious handwriting/OCR slips fixed and abbreviations kept readable (e.g. "Coca-Cola 1.5 l", "Shakar 1 kg", "Non tandir"). Keep the original language of the product name; transliterate Cyrillic Uzbek to Latin Uzbek. Max 200 characters.
+- description: null unless the list itself has extra detail worth keeping (max 200 characters).
+- unit: KG when the row is clearly sold by weight (kg / кг, or loose goods like sugar, rice, flour, meat sold per kg); LITER only for loose liquids sold by volume; BOX for whole boxes/blocks; METER for goods sold by length; otherwise PIECE.
+- NEVER guess numbers. salePrice / costPrice / initialQty only when written; barcode only if all 8-14 digits are clearly legible. Otherwise null.
+- categoryId: the id of the best matching category from the provided list. If none fits, null and propose a short Uzbek newCategoryName (reuse the same new name for similar products). Never set both.
+- Text you write yourself (notes, newCategoryName, description) is in Uzbek, Latin script, with the apostrophes ‘ and ’ (o‘, g‘, ma’lumot).
+- confidence: high = name and price clearly legible; medium = small doubts; low = hard to read or guessed reading.
+- notes: what the user should double-check (e.g. "narx noaniq o‘qildi", "2-son miqdor bo‘lishi mumkin"), or null.
+- If no list rows or products are visible, return an empty drafts list.
 - Respond with JSON only, matching the requested schema.`;
 
 /** "12 500", "12500.5" → "12500.00"; boshqasi → null. */
@@ -154,7 +156,7 @@ export class AiDraftService {
     const userText =
       `Photos sent: ${files.length} (indexes 0..${files.length - 1}).\n` +
       `Existing categories (JSON): ${JSON.stringify(categories)}\n` +
-      'Return the product drafts.';
+      'Read the list and return one draft per product row.';
 
     let result: { output: DraftOutput; model: string };
     switch (provider) {
@@ -188,7 +190,7 @@ export class AiDraftService {
 
   private async callGemini(images: ImageInput[], userText: string): Promise<{ output: DraftOutput; model: string }> {
     const model = process.env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
-    this.gemini ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY!.trim() });
+    this.gemini ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY!.trim(), httpOptions: { timeout: REQUEST_TIMEOUT_MS } });
 
     const parts = [...images.map((i) => ({ inlineData: { mimeType: i.mime, data: i.b64 } })), { text: userText }];
     let text: string | undefined;
@@ -200,7 +202,7 @@ export class AiDraftService {
           systemInstruction: SYSTEM_PROMPT,
           responseMimeType: 'application/json',
           responseJsonSchema: DRAFT_JSON_SCHEMA,
-          maxOutputTokens: 8192,
+          maxOutputTokens: 32768,
         },
       });
       text = response.text;
@@ -244,7 +246,7 @@ export class AiDraftService {
         },
         body: JSON.stringify({
           model,
-          max_tokens: 8192,
+          max_tokens: 16000,
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
             {
