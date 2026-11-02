@@ -18,13 +18,13 @@ import type { AuthUser } from '../common/auth/auth-user.js';
  *   AI_PROVIDER=gemini | openrouter | claude, yoki zanjir: "gemini,openrouter" (birinchisi ishlamasa — keyingisi).
  *   Bo‘sh bo‘lsa — kaliti bor hammasi shu tartibda: gemini → openrouter → claude.
  *   *_MODEL ham vergul bilan bir nechta bo‘lishi mumkin: "model-a,model-b" — navbat bilan sinab ko‘riladi.
- *   GEMINI_API_KEY,     GEMINI_MODEL     (standart: gemini-3.5-flash)
+ *   GEMINI_API_KEY,     GEMINI_MODEL     (standart: gemini-3.5-flash-lite)
  *   OPENROUTER_API_KEY, OPENROUTER_MODEL (majburiy: rasm + structured outputs qo‘llaydigan model, masalan google/... yoki anthropic/...)
  *   ANTHROPIC_API_KEY,  ANTHROPIC_MODEL  (standart: claude-opus-5-5)
  */
 type Provider = 'gemini' | 'openrouter' | 'claude';
 
-const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash';
+const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
 const DEFAULT_CLAUDE_MODEL = 'claude-opus-5-5';
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const REQUEST_TIMEOUT_MS = 90_000;
@@ -94,14 +94,14 @@ The user photographs a list written on paper: a notebook page, a handwritten or 
 How to read the list:
 - Every row (line) that names a product is ONE entry. Read every row top to bottom, in order; do not skip, merge or invent rows. Skip titles, dates, totals ("jami", "итого", "сумма"), signatures and crossed-out rows.
 - If a header row names the columns, map each column by its header (any spelling or language): "nomi / nomlanishi / mahsulot / tovar / наименование / товар / name" -> name; "narxi / sotuv narxi / sotish / цена / розница / price" -> salePrice; "tannarx / kelish narxi / olish narxi / xarid / себестоимость / закуп / опт / cost" -> costPrice; "soni / miqdori / qoldiq / dona / кол-во / количество / qty" -> initialQty; "shtrix / kod / штрихкод / barcode" -> barcode; "birlik / o‘lchov / ед. / unit" -> unit. Ignore columns you cannot map (row numbers, row sums, dates).
-- If there is NO header: a row with a name and one number = name + salePrice. With two numbers, use the pattern of the whole list: a small integer next to "ta", "dona", "kg", "шт" is a quantity (initialQty); of two money amounts the larger is salePrice and the smaller costPrice. If the meaning of a number is unclear, put the most price-like one in salePrice and mention the rest in notes.
+- If there is NO header: a row with a name and one number = name + salePrice. With two numbers, use the pattern of the whole list: a separate count like "x 30ta", "30 dona", "soni 30" is a quantity (initialQty), but a number glued to the product name that describes the package ("Tuxum 10ta", "Pampers 52 dona") is part of the name, not a quantity; of two money amounts the larger is salePrice and the smaller costPrice. If the meaning of a number is unclear, put the most price-like one in salePrice and mention the rest in notes.
 - Money: "12 500", "12.500", "12,500", "12,5 ming", "12.5k", "12 500 so‘m" all mean 12500 so‘m. Write money as plain digits ("12500"). Quantities as digits ("24", "1.5").
 - If the same product appears in several photos (overlapping shots of a long list), return it ONCE and list every photo index (0-based, in the order sent) in imageIndexes.
 
 Field rules:
 - name: the product as written in the list, with obvious handwriting/OCR slips fixed and abbreviations kept readable (e.g. "Coca-Cola 1.5 l", "Shakar 1 kg", "Non tandir"). Keep the original language of the product name; transliterate Cyrillic Uzbek to Latin Uzbek. Max 200 characters.
 - description: null unless the list itself has extra detail worth keeping (max 200 characters).
-- unit: KG when the row is clearly sold by weight (kg / кг, or loose goods like sugar, rice, flour, meat sold per kg); LITER only for loose liquids sold by volume; BOX for whole boxes/blocks; METER for goods sold by length; otherwise PIECE.
+- unit: PIECE for anything packaged with its size in the name ("Coca-Cola 1.5 l", "Sut 1 l", "Shakar 1 kg" pack, "Tuxum 10 ta" tray) — the size belongs in the name. KG only when the goods are weighed loose and the price is per kg ("guruch kg 16000", "kartoshka 1 kg narxi"). LITER only for liquids poured by volume (no bottle size). BOX for whole boxes/blocks; METER for goods sold by length.
 - NEVER guess numbers. salePrice / costPrice / initialQty only when written; barcode only if all 8-14 digits are clearly legible. Otherwise null.
 - categoryId: the id of the best matching category from the provided list. If none fits, null and propose a short Uzbek newCategoryName (reuse the same new name for similar products). Never set both.
 - Text you write yourself (notes, newCategoryName, description) is in Uzbek, Latin script, with the apostrophes ‘ and ’ (o‘, g‘, ma’lumot).
