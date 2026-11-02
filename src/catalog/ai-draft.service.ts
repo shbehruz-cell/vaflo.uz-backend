@@ -15,7 +15,9 @@ import type { AuthUser } from '../common/auth/auth-user.js';
 
 /**
  * AI provayderi `.env` orqali tanlanadi:
- *   AI_PROVIDER=gemini | openrouter | claude   (bo‘sh bo‘lsa — kaliti bor birinchisi: gemini → openrouter → claude)
+ *   AI_PROVIDER=gemini | openrouter | claude, yoki zanjir: "gemini,openrouter" (birinchisi ishlamasa — keyingisi).
+ *   Bo‘sh bo‘lsa — kaliti bor hammasi shu tartibda: gemini → openrouter → claude.
+ *   *_MODEL ham vergul bilan bir nechta bo‘lishi mumkin: "model-a,model-b" — navbat bilan sinab ko‘riladi.
  *   GEMINI_API_KEY,     GEMINI_MODEL     (standart: gemini-3.5-flash)
  *   OPENROUTER_API_KEY, OPENROUTER_MODEL (majburiy: rasm + structured outputs qo‘llaydigan model, masalan google/... yoki anthropic/...)
  *   ANTHROPIC_API_KEY,  ANTHROPIC_MODEL  (standart: claude-opus-5-5)
@@ -108,6 +110,24 @@ Field rules:
 - If no list rows or products are visible, return an empty drafts list.
 - Respond with JSON only, matching the requested schema.`;
 
+/** Vaqtincha xato (band, limit, tarmoq) — boshqa model/provayder bilan qayta urinish mumkin. */
+class RetryableAiError extends BadGatewayException {
+  constructor() {
+    super(MSG_UNAVAILABLE);
+  }
+}
+
+const RETRY_DELAY_MS = 2000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** "a, b ,c" → ["a","b","c"] */
+function splitList(v: string | undefined): string[] {
+  return (v ?? '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
 /** "12 500", "12500.5" → "12500.00"; boshqasi → null. */
 function money(v: string | null): string | null {
   const s = v?.trim().replace(/\s/g, '') ?? '';
@@ -143,8 +163,8 @@ export class AiDraftService {
       return { drafts: this.mockDrafts(files.length), model: 'mock' };
     }
 
-    const provider = this.resolveProvider();
-    if (!provider) throw new ServiceUnavailableException(MSG_NOT_CONFIGURED);
+    const providers = this.resolveProviders();
+    if (providers.length === 0) throw new ServiceUnavailableException(MSG_NOT_CONFIGURED);
 
     const categories = await this.prisma.category.findMany({
       where: { storeId: user.storeId },
@@ -158,44 +178,67 @@ export class AiDraftService {
       `Existing categories (JSON): ${JSON.stringify(categories)}\n` +
       'Read the list and return one draft per product row.';
 
-    let result: { output: DraftOutput; model: string };
-    switch (provider) {
-      case 'gemini':
-        result = await this.callGemini(images, userText);
-        break;
-      case 'openrouter':
-        result = await this.callOpenRouter(images, userText);
-        break;
-      case 'claude':
-        result = await this.callClaude(images, userText);
-        break;
+    // Provayderlar zanjiri: biri band/xato bo‘lsa — keyingisi. Oxirgi xato foydalanuvchiga qaytariladi.
+    let lastError: unknown = new ServiceUnavailableException(MSG_NOT_CONFIGURED);
+    for (const provider of providers) {
+      try {
+        const result =
+          provider === 'gemini'
+            ? await this.callGemini(images, userText)
+            : provider === 'openrouter'
+              ? await this.callOpenRouter(images, userText)
+              : await this.callClaude(images, userText);
+        return { drafts: this.normalize(result.output.drafts, categories, files.length), model: result.model };
+      } catch (e) {
+        lastError = e;
+        this.logger.warn(`${provider} ishlamadi, keyingi provayder sinab ko‘riladi`);
+      }
     }
-
-    return { drafts: this.normalize(result.output.drafts, categories, files.length), model: result.model };
+    throw lastError;
   }
 
-  /** AI_PROVIDER aniq ko‘rsatilgan bo‘lsa — o‘sha (kaliti bo‘lmasa null); aks holda kaliti bor birinchisi. */
-  private resolveProvider(): Provider | null {
+  /** AI_PROVIDER ro‘yxati (vergul bilan) — kaliti borlari, berilgan tartibda; bo‘sh bo‘lsa kaliti bor hammasi. */
+  private resolveProviders(): Provider[] {
     const has: Record<Provider, boolean> = {
       gemini: !!process.env.GEMINI_API_KEY?.trim(),
       openrouter: !!process.env.OPENROUTER_API_KEY?.trim(),
       claude: !!process.env.ANTHROPIC_API_KEY?.trim(),
     };
-    const wanted = process.env.AI_PROVIDER?.trim().toLowerCase();
-    if (wanted === 'gemini' || wanted === 'openrouter' || wanted === 'claude') return has[wanted] ? wanted : null;
-    return (['gemini', 'openrouter', 'claude'] as const).find((p) => has[p]) ?? null;
+    const all: Provider[] = ['gemini', 'openrouter', 'claude'];
+    const wanted = splitList(process.env.AI_PROVIDER).filter((p): p is Provider => (all as string[]).includes(p));
+    return [...new Set(wanted.length ? wanted : all)].filter((p) => has[p]);
   }
 
   // ---------- Gemini (@google/genai) ----------
 
   private async callGemini(images: ImageInput[], userText: string): Promise<{ output: DraftOutput; model: string }> {
-    const model = process.env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
+    const models = splitList(process.env.GEMINI_MODEL);
+    if (models.length === 0) models.push(DEFAULT_GEMINI_MODEL);
     this.gemini ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY!.trim(), httpOptions: { timeout: REQUEST_TIMEOUT_MS } });
 
+    let lastError: unknown;
+    for (const model of models) {
+      // Band (503/429/500) bo‘lsa — qisqa kutib bir marta qayta; baribir bo‘lmasa keyingi model
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          return await this.geminiOnce(model, images, userText);
+        } catch (e) {
+          lastError = e;
+          if (e instanceof ServiceUnavailableException) throw e; // kalit noto‘g‘ri — boshqa model ham yordam bermaydi
+          const busy = e instanceof RetryableAiError;
+          if (!busy || attempt === 2) break;
+          await sleep(RETRY_DELAY_MS);
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  private async geminiOnce(model: string, images: ImageInput[], userText: string): Promise<{ output: DraftOutput; model: string }> {
     const parts = [...images.map((i) => ({ inlineData: { mimeType: i.mime, data: i.b64 } })), { text: userText }];
     let text: string | undefined;
     try {
-      const response = await this.gemini.models.generateContent({
+      const response = await this.gemini!.models.generateContent({
         model,
         contents: [{ role: 'user', parts }],
         config: {
@@ -208,32 +251,45 @@ export class AiDraftService {
       text = response.text;
       if (!text) {
         // Javob bo‘sh — odatda xavfsizlik filtri to‘xtatgan
-        this.logger.warn(`Gemini bo‘sh javob: ${JSON.stringify(response.promptFeedback ?? response.candidates?.[0]?.finishReason ?? null)}`);
+        this.logger.warn(`Gemini (${model}) bo‘sh javob: ${JSON.stringify(response.promptFeedback ?? response.candidates?.[0]?.finishReason ?? null)}`);
         throw new UnprocessableEntityException(MSG_REFUSED);
       }
     } catch (e) {
       if (e instanceof UnprocessableEntityException) throw e;
       if (e instanceof GeminiApiError) {
-        this.logger.error(`Gemini xatosi (${e.status}): ${e.message}`);
+        this.logger.error(`Gemini (${model}) xatosi (${e.status}): ${e.message.slice(0, 300)}`);
         if (e.status === 401 || e.status === 403) throw new ServiceUnavailableException(MSG_KEY_REJECTED);
+        if (e.status === 429 || e.status >= 500) throw new RetryableAiError();
         throw new BadGatewayException(MSG_UNAVAILABLE);
       }
-      this.logger.error(`Gemini kutilmagan xato: ${e instanceof Error ? e.message : String(e)}`);
-      throw new BadGatewayException(MSG_UNAVAILABLE);
+      this.logger.error(`Gemini (${model}) kutilmagan xato: ${e instanceof Error ? e.message : String(e)}`);
+      throw new RetryableAiError();
     }
-    return { output: this.parseJson(text, 'Gemini'), model };
+    return { output: this.parseJson(text, `Gemini ${model}`), model };
   }
 
   // ---------- OpenRouter (OpenAI-mos HTTP API) ----------
 
   private async callOpenRouter(images: ImageInput[], userText: string): Promise<{ output: DraftOutput; model: string }> {
-    const model = process.env.OPENROUTER_MODEL?.trim();
-    if (!model) {
+    const models = splitList(process.env.OPENROUTER_MODEL);
+    if (models.length === 0) {
       throw new ServiceUnavailableException(
-        'OPENROUTER_MODEL ko‘rsatilmagan. .env ga rasm va structured outputs qo‘llaydigan model nomini yozing.',
+        'OPENROUTER_MODEL ko‘rsatilmagan. .env ga rasmni o‘qiy oladigan model nomini yozing (bir nechtasini vergul bilan).',
       );
     }
+    let lastError: unknown;
+    for (const model of models) {
+      try {
+        return await this.openRouterOnce(model, images, userText);
+      } catch (e) {
+        lastError = e;
+        if (e instanceof ServiceUnavailableException) throw e; // kalit/balans muammosi — boshqa model ham yordam bermaydi
+      }
+    }
+    throw lastError;
+  }
 
+  private async openRouterOnce(model: string, images: ImageInput[], userText: string): Promise<{ output: DraftOutput; model: string }> {
     let res: Response;
     try {
       res = await fetch(OPENROUTER_URL, {
@@ -253,7 +309,8 @@ export class AiDraftService {
               role: 'user',
               content: [
                 ...images.map((i) => ({ type: 'image_url', image_url: { url: `data:${i.mime};base64,${i.b64}` } })),
-                { type: 'text', text: userText },
+                // Structured outputs’ni qo‘llamaydigan (ko‘p bepul) modellar uchun sxema matnda ham beriladi
+                { type: 'text', text: `${userText}\nJSON schema:\n${JSON.stringify(DRAFT_JSON_SCHEMA)}` },
               ],
             },
           ],
@@ -261,13 +318,11 @@ export class AiDraftService {
             type: 'json_schema',
             json_schema: { name: 'product_drafts', strict: true, schema: DRAFT_JSON_SCHEMA },
           },
-          // Faqat structured outputs’ni qo‘llaydigan provayderlarga yo‘naltirish
-          provider: { require_parameters: true },
         }),
       });
     } catch (e) {
-      this.logger.error(`OpenRouter tarmoq xatosi: ${e instanceof Error ? e.message : String(e)}`);
-      throw new BadGatewayException(MSG_UNAVAILABLE);
+      this.logger.error(`OpenRouter (${model}) tarmoq xatosi: ${e instanceof Error ? e.message : String(e)}`);
+      throw new RetryableAiError();
     }
 
     const body = (await res.json().catch(() => null)) as {
@@ -276,29 +331,29 @@ export class AiDraftService {
     } | null;
 
     if (!res.ok) {
-      this.logger.error(`OpenRouter xatosi (${res.status}): ${body?.error?.message ?? 'javob yo‘q'}`);
+      this.logger.error(`OpenRouter (${model}) xatosi (${res.status}): ${body?.error?.message?.slice(0, 300) ?? 'javob yo‘q'}`);
       if (res.status === 401 || res.status === 402 || res.status === 403) throw new ServiceUnavailableException(MSG_KEY_REJECTED);
-      throw new BadGatewayException(MSG_UNAVAILABLE);
+      throw new RetryableAiError();
     }
 
     const choice = body?.choices?.[0];
     if (choice?.error) {
-      this.logger.error(`OpenRouter model xatosi (${choice.error.code}): ${choice.error.message}`);
-      throw new BadGatewayException(MSG_UNAVAILABLE);
+      this.logger.error(`OpenRouter (${model}) model xatosi (${choice.error.code}): ${choice.error.message.slice(0, 300)}`);
+      throw new RetryableAiError();
     }
     if (choice?.finish_reason === 'content_filter') throw new UnprocessableEntityException(MSG_REFUSED);
     const text = choice?.message?.content;
     if (!text) {
-      this.logger.error(`OpenRouter bo‘sh javob (finish_reason: ${choice?.finish_reason ?? '—'})`);
-      throw new BadGatewayException(MSG_UNAVAILABLE);
+      this.logger.error(`OpenRouter (${model}) bo‘sh javob (finish_reason: ${choice?.finish_reason ?? '—'})`);
+      throw new RetryableAiError();
     }
-    return { output: this.parseJson(text, 'OpenRouter'), model };
+    return { output: this.parseJson(text, `OpenRouter ${model}`), model };
   }
 
   // ---------- Claude (@anthropic-ai/sdk) ----------
 
   private async callClaude(images: ImageInput[], userText: string): Promise<{ output: DraftOutput; model: string }> {
-    const model = process.env.ANTHROPIC_MODEL?.trim() || DEFAULT_CLAUDE_MODEL;
+    const model = splitList(process.env.ANTHROPIC_MODEL)[0] ?? DEFAULT_CLAUDE_MODEL;
     this.claude ??= new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY!.trim() });
 
     const content: Anthropic.ContentBlockParam[] = images.map((i) => ({
