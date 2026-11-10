@@ -21,8 +21,8 @@ export class RolesController {
 
   @Get('permissions')
   @RequirePermissions('users.manage', 'roles.manage')
-  permissions() {
-    return this.roles.permissions();
+  permissions(@CurrentUser() user: AuthUser) {
+    return this.roles.permissions(user);
   }
 
   @Post()

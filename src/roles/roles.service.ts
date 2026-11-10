@@ -7,7 +7,8 @@ import {
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AuditService, type AuditContext } from '../audit/audit.service.js';
-import { ALL_PERMISSIONS, PERMISSIONS, type PermissionCode } from '../common/permissions.js';
+import { isPlatformStore } from '../stores/tenant-bootstrap.js';
+import { ALL_PERMISSIONS, PERMISSIONS, PLATFORM_ONLY, type PermissionCode } from '../common/permissions.js';
 import type { AuthUser } from '../common/auth/auth-user.js';
 import type { CreateRoleDto, UpdateRoleDto } from './dto/roles.dto.js';
 
@@ -54,17 +55,19 @@ export class RolesService {
     return rows.map(present);
   }
 
-  permissions() {
-    return ALL_PERMISSIONS.map((code) => ({ code, description: PERMISSIONS[code] }));
+  async permissions(actor: AuthUser) {
+    const platform = await isPlatformStore(this.prisma, actor.storeId);
+    return ALL_PERMISSIONS.filter((code) => platform || !PLATFORM_ONLY.includes(code)).map((code) => ({ code, description: PERMISSIONS[code] }));
   }
 
   private assertOwner(actor: AuthUser) {
     if (actor.roleKey !== 'owner') throw new ForbiddenException('Rollarni faqat owner boshqara oladi');
   }
 
-  private validateCodes(codes: string[]): PermissionCode[] {
+  private async validateCodes(actor: AuthUser, codes: string[]): Promise<PermissionCode[]> {
     const unique = [...new Set(codes)];
-    const known = new Set<string>(ALL_PERMISSIONS);
+    const platform = await isPlatformStore(this.prisma, actor.storeId);
+    const known = new Set<string>(ALL_PERMISSIONS.filter((c) => platform || !PLATFORM_ONLY.includes(c)));
     const bad = unique.filter((c) => !known.has(c));
     if (bad.length) throw new UnprocessableEntityException(`Noma’lum ruxsat kodlari: ${bad.join(', ')}`);
     return unique as PermissionCode[];
@@ -72,7 +75,7 @@ export class RolesService {
 
   async create(actor: AuthUser, dto: CreateRoleDto, ctx: AuditContext) {
     this.assertOwner(actor);
-    const codes = this.validateCodes(dto.permissions);
+    const codes = await this.validateCodes(actor, dto.permissions);
     const key = `custom-${randomBytes(4).toString('hex')}`;
 
     return this.prisma.$transaction(async (tx) => {
@@ -97,7 +100,7 @@ export class RolesService {
 
   async update(actor: AuthUser, id: string, dto: UpdateRoleDto, ctx: AuditContext) {
     this.assertOwner(actor);
-    const codes = dto.permissions ? this.validateCodes(dto.permissions) : undefined;
+    const codes = dto.permissions ? await this.validateCodes(actor, dto.permissions) : undefined;
 
     return this.prisma.$transaction(async (tx) => {
       const role = await tx.role.findFirst({ where: { id, storeId: actor.storeId }, include: roleInclude });

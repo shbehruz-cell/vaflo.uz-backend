@@ -25,9 +25,12 @@ model User {
   login        String     @unique // email yoki telefon (normalizatsiya qilingan)
   passwordHash String
   status       UserStatus @default(ACTIVE)
+  // 2 bosqichli kirish: yoqilsa, login paytida emailga 6 xonali kod yuboriladi
+  twoFactorEnabled Boolean @default(false)
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
+  challenges          AuthChallenge[]
   store               Store                @relation(fields: [storeId], references: [id])
   role                Role                 @relation(fields: [roleId], references: [id])
   sessions            Session[]
@@ -36,12 +39,50 @@ model User {
   @@index([storeId])
 }
 
+enum ChallengePurpose {
+  LOGIN_2FA
+  PASSWORD_RESET
+  SIGNUP
+}
+
+/// Emailga yuborilgan bir martalik kod (2 bosqichli kirish va parolni tiklash).
+model AuthChallenge {
+  id             String           @id @default(uuid()) @db.Uuid
+  userId         String?          @db.Uuid // SIGNUP uchun null (hisob hali yo‘q)
+  email          String? // SIGNUP: tasdiqlanayotgan email
+  purpose        ChallengePurpose
+  codeHash       String
+  attempts       Int              @default(0)
+  sendCount      Int              @default(1)
+  lastSentAt     DateTime         @default(now())
+  expiresAt      DateTime
+  verifiedAt     DateTime?
+  resetTokenHash String?          @unique // tasdiqlangandan keyingi bir martalik token (parol tiklash va signup uchun umumiy)
+  consumedAt     DateTime?
+  createdAt      DateTime         @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+  @@index([email, purpose, createdAt])
+}
+
 model Session {
   id        String    @id @default(uuid()) @db.Uuid
   userId    String    @db.Uuid
   tokenHash String    @unique // refresh token SHA-256
   userAgent String?
   ip        String?
+  /// Mobil ilova yuboradigan qurilma nomi (masalan "iPhone 15 Pro") va tizimi ("iOS 26.1")
+  deviceName String?
+  platform   String?
+  /// Birinchi kirgan vaqt: refresh rotatsiyasida yangi qator yaratiladi, lekin bu qiymat saqlanadi
+  firstSeenAt DateTime @default(now())
+  /// IP bo‘yicha taxminiy joylashuv (shahar darajasida)
+  city      String?
+  country   String?
+  latitude  Float?
+  longitude Float?
   expiresAt DateTime
   revokedAt DateTime?
   createdAt DateTime  @default(now())

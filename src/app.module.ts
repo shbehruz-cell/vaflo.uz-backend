@@ -6,6 +6,7 @@ import { PrismaModule } from './prisma/prisma.module.js';
 import { AuditModule } from './audit/audit.module.js';
 import { StockModule } from './inventory/stock.module.js';
 import { AuthGuard } from './common/guards/auth.guard.js';
+import { MailModule } from './mail/mail.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { UsersModule } from './users/users.module.js';
 import { RolesModule } from './roles/roles.module.js';
@@ -30,6 +31,7 @@ import { HealthModule } from './health/health.module.js';
     }),
     PrismaModule,
     AuditModule,
+    MailModule,
     StockModule,
     AuthModule,
     UsersModule,

@@ -48,3 +48,6 @@ export const DEFAULT_ROLES: Record<'owner' | 'deputy' | 'worker', { name: string
 
 /** Chegirma limiti (foiz) — undan yuqorisi uchun discount.override kerak. */
 export const DISCOUNT_LIMIT_PERCENT = 10;
+
+/** Faqat platforma do‘koniga (PLATFORM_STORE_ID) tegishli ruxsatlar: oddiy do‘kon rollariga berilmaydi. */
+export const PLATFORM_ONLY: readonly PermissionCode[] = ['demo_requests.read'];

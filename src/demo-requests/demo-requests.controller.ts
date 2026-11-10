@@ -2,7 +2,8 @@ import { Body, Controller, Get, HttpCode, Post, Query, Req } from '@nestjs/commo
 import { Throttle } from '@nestjs/throttler';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
-import { Public, RequirePermissions } from '../common/decorators/auth.decorators.js';
+import { CurrentUser, Public, RequirePermissions } from '../common/decorators/auth.decorators.js';
+import type { AuthUser } from '../common/auth/auth-user.js';
 import { PaginationQuery } from '../common/pagination.dto.js';
 import { DemoRequestsService } from './demo-requests.service.js';
 import { CreateDemoRequestDto } from './dto.js';
@@ -23,7 +24,7 @@ export class DemoRequestsController {
   @ApiBearerAuth()
   @RequirePermissions('demo_requests.read')
   @Get()
-  list(@Query() q: PaginationQuery) {
-    return this.service.list(q);
+  list(@Query() q: PaginationQuery, @CurrentUser() user: AuthUser) {
+    return this.service.list(q, user);
   }
 }

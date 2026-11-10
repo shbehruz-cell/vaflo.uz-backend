@@ -3,7 +3,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import * as argon2 from 'argon2';
 import { PrismaClient } from '../src/generated/prisma/client.js';
 import { normalizeLogin } from '../src/common/normalize.js';
-import { ALL_PERMISSIONS, DEFAULT_ROLES, PERMISSIONS } from '../src/common/permissions.js';
+import { ALL_PERMISSIONS, DEFAULT_ROLES, PERMISSIONS, PLATFORM_ONLY } from '../src/common/permissions.js';
 
 // Production'da faqat boshlang‘ich sozlash (do‘kon, ombor, kassa, rollar, Owner) — demo mahsulotlarsiz (TZ 18).
 // Do‘kon allaqachon bo‘lsa, faqat permissionlar yangilanadi, shuning uchun qayta ishga tushirish xavfsiz.
@@ -33,9 +33,16 @@ async function main() {
   const existing = await prisma.store.findFirst({ orderBy: { createdAt: 'asc' } });
   if (existing) {
     // Yangi qo‘shilgan permissionlar Owner roliga ham beriladi (Owner hamma narsaga ega)
-    const ownerRoles = await prisma.role.findMany({ where: { key: 'owner' }, select: { id: true } });
+    // Platforma do‘koni (PLATFORM_STORE_ID yoki eng birinchi do‘kon) dan boshqalarga PLATFORM_ONLY (demo so‘rovlar) berilmaydi
+    const platformStoreId = process.env.PLATFORM_STORE_ID || existing.id;
+    const ownerRoles = await prisma.role.findMany({ where: { key: 'owner' }, select: { id: true, storeId: true } });
     await prisma.rolePermission.createMany({
-      data: ownerRoles.flatMap((r) => ALL_PERMISSIONS.map((permissionCode) => ({ roleId: r.id, permissionCode }))),
+      data: ownerRoles.flatMap((r) =>
+        ALL_PERMISSIONS.filter((c) => r.storeId === platformStoreId || !PLATFORM_ONLY.includes(c)).map((permissionCode) => ({
+          roleId: r.id,
+          permissionCode,
+        })),
+      ),
       skipDuplicates: true,
     });
     console.log(`Do‘kon allaqachon mavjud (id: ${existing.id}). Permissionlar yangilandi, boshqa o‘zgarish yo‘q.`);
