@@ -27,8 +27,18 @@ export const DEFAULT_LOGIN_THROTTLE: LoginThrottleOptions = {
 export class LoginThrottleService {
   private readonly buckets = new Map<string, Bucket>();
   private lastSweep = Date.now();
+  // Konstruktor parametrsiz: Nest DI ixtiyoriy parametrlarni ham provider deb qidiradi.
+  private opts: LoginThrottleOptions = DEFAULT_LOGIN_THROTTLE;
+  private now: () => number = Date.now;
 
-  constructor(private readonly opts: LoginThrottleOptions = DEFAULT_LOGIN_THROTTLE, private readonly now: () => number = Date.now) {}
+  /** Testlar uchun: boshqa limitlar va soat bilan nusxa. */
+  static create(opts: LoginThrottleOptions, now: () => number = Date.now) {
+    const s = new LoginThrottleService();
+    s.opts = opts;
+    s.now = now;
+    s.lastSweep = now();
+    return s;
+  }
 
   /** Urinishdan OLDIN: limit oshgan bo‘lsa 429 (parol tekshirilmaydi, argon2 ham sarflanmaydi). */
   assertAllowed(login: string, ip?: string | null) {

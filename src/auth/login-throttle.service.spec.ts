@@ -4,7 +4,7 @@ import { LoginThrottleService } from './login-throttle.service.js';
 
 function make() {
   let t = 1_000_000;
-  const svc = new LoginThrottleService({ windowMs: 60_000, maxPerLogin: 3, maxPerIp: 5 }, () => t);
+  const svc = LoginThrottleService.create({ windowMs: 60_000, maxPerLogin: 3, maxPerIp: 5 }, () => t);
   return { svc, tick: (ms: number) => (t += ms) };
 }
 
