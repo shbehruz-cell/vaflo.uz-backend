@@ -40,6 +40,7 @@ npm run start:dev
 - Pul/miqdor — `Decimal`; qoldiq faqat `StockService.apply()` orqali atomik o‘zgaradi.
 - Xato formati: `{ statusCode, error, message, requestId }` — stack trace clientga chiqmaydi.
 - Parollar argon2id; refresh token bazada faqat SHA-256 xesh ko‘rinishida.
+- Xavfsizlik qatlamlari (brute-force, CSRF, token reuse, parol siyosati, CSP) va server sozlamalari: `docs/SECURITY.md`. Production’da zaif `JWT_ACCESS_SECRET` bilan ilova ishga tushmaydi.
 - `npm run db:seed` production’da faqat do‘kon, ombor, kassa, rollar va Owner yaratadi (demo mahsulotlarsiz).
 
 ## Hali qilinmagan (TZ keyingi bosqichlari)

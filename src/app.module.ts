@@ -23,11 +23,18 @@ import { HealthModule } from './health/health.module.js';
 
 @Module({
   imports: [
-    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
+    // Ikki darajali IP limiti: daqiqasiga 120 va soatiga 6000 (POS kuni davomida yetarli; skaner/flood uchun to‘siq).
+    // Auth endpointlari o‘z qiymatlarini @Throttle({ default, hourly }) bilan beradi.
+    ThrottlerModule.forRoot([
+      { name: 'default', ttl: 60_000, limit: 120 },
+      { name: 'hourly', ttl: 3_600_000, limit: 6000 },
+    ]),
     JwtModule.register({
       global: true,
       secret: process.env.JWT_ACCESS_SECRET,
-      signOptions: { expiresIn: Number(process.env.JWT_ACCESS_TTL ?? 900) },
+      signOptions: { expiresIn: Number(process.env.JWT_ACCESS_TTL ?? 900), algorithm: 'HS256' },
+      // Faqat HS256 qabul qilinadi (algoritm almashtirish hujumlariga qarshi)
+      verifyOptions: { algorithms: ['HS256'] },
     }),
     PrismaModule,
     AuditModule,

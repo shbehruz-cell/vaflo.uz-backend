@@ -1,13 +1,15 @@
 import { BadRequestException, ConflictException, ForbiddenException, HttpException, HttpStatus, Injectable, NotFoundException, UnauthorizedException, UnprocessableEntityException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
-import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Response } from 'express';
 import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService, type Tx } from '../prisma/prisma.service.js';
 import { AuditService, type AuditContext } from '../audit/audit.service.js';
 import { MailService, type CodePurpose } from '../mail/mail.service.js';
 import { GeoService } from './geo.service.js';
+import { LoginThrottleService } from './login-throttle.service.js';
+import { passwordProblem } from '../common/password.js';
 import { normalizeLogin } from '../common/normalize.js';
 import { createTenant } from '../stores/tenant-bootstrap.js';
 import type { AuthUser } from '../common/auth/auth-user.js';
@@ -31,11 +33,17 @@ const SIGNUP_STARTS_PER_HOUR = 5;
 /** Band email uchun signup urinishi: kod yo‘q, hech qachon tasdiqlanmaydi (codeHash shu qiymat). */
 const EXISTS_MARK = 'EXISTS';
 const refreshDays = () => Number(process.env.REFRESH_TTL_DAYS ?? 30) || 30;
+/** Sessiyaning mutlaq umri (kun): refresh rotatsiyasi bilan ham shundan uzoq yashamaydi. */
+const absoluteDays = () => Number(process.env.REFRESH_ABSOLUTE_DAYS ?? 180) || 180;
+/** Bekor qilingan refresh token shu muddat ichida qayta kelsa — parallel so‘rov (poyga) deb hisoblanadi, undan keyin — o‘g‘irlik. */
+const REUSE_GRACE_MS = 10_000;
 
 interface ClientInfo {
   userAgent?: string;
   device?: string;
   ip?: string;
+  /** Cookie asosidagi refresh uchun CSRF tekshiruvi: brauzer yuboradigan Sec-Fetch-Site sarlavhasi. */
+  secFetchSite?: string;
 }
 
 @Injectable()
@@ -48,6 +56,7 @@ export class AuthService {
     private readonly audit: AuditService,
     private readonly mail: MailService,
     private readonly geo: GeoService,
+    private readonly loginThrottle: LoginThrottleService,
   ) {}
 
   private getDummyHash() {
@@ -122,6 +131,8 @@ export class AuthService {
 
   async login(dto: LoginDto, client: ClientInfo, res: Response, ctx: AuditContext, mobile = false) {
     const login = normalizeLogin(dto.login);
+    // Hisob/IP bo‘yicha brute-force limiti (parol tekshirilmasdan oldin).
+    this.loginThrottle.assertAllowed(login, client.ip);
     const user = await this.prisma.user.findUnique({ where: { login } });
 
     let ok = false;
@@ -131,12 +142,14 @@ export class AuthService {
       await argon2.verify(await this.getDummyHash(), dto.password).catch(() => false);
     }
     if (!user || !ok || user.status !== 'ACTIVE') {
+      this.loginThrottle.recordFailure(login, client.ip);
       await this.audit.log(
         { ...ctx, storeId: user?.storeId },
         { action: 'auth.login_failed', entityType: 'User', entityId: user?.id, metadata: { login } },
       );
       throw new UnauthorizedException(BAD_CREDENTIALS);
     }
+    this.loginThrottle.recordSuccess(login);
 
     if (user.twoFactorEnabled && user.login.includes('@')) {
       const challenge = await this.startChallenge(user.id, user.login, 'LOGIN_2FA');
@@ -175,8 +188,16 @@ export class AuthService {
     if (!ch || ch.purpose !== purpose || ch.consumedAt || ch.expiresAt < new Date() || ch.attempts >= MAX_ATTEMPTS || (ch.user && ch.user.status !== 'ACTIVE')) {
       throw new UnauthorizedException(BAD_CODE);
     }
-    if (ch.codeHash !== codeHash(ch.id, code)) {
-      await this.prisma.authChallenge.update({ where: { id: ch.id }, data: { attempts: { increment: 1 } } });
+    // Urinish hisoblagichi atomik oshiriladi (parallel so‘rovlar limitni chetlab o‘ta olmaydi):
+    // tekshiruvdan OLDIN sarflanadi, to‘g‘ri kod bo‘lsa challenge baribir keyin iste‘mol qilinadi.
+    const claimed = await this.prisma.authChallenge.updateMany({
+      where: { id: ch.id, attempts: { lt: MAX_ATTEMPTS }, consumedAt: null },
+      data: { attempts: { increment: 1 } },
+    });
+    if (claimed.count !== 1) throw new UnauthorizedException(BAD_CODE);
+    const expected = Buffer.from(ch.codeHash, 'utf8');
+    const actual = Buffer.from(codeHash(ch.id, code), 'utf8');
+    if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
       throw new UnauthorizedException(BAD_CODE);
     }
     return ch;
@@ -282,7 +303,8 @@ export class AuthService {
       throw new BadRequestException(EXPIRED);
     }
     const email = ch.email;
-    if (dto.password.toLowerCase() === email) throw new UnprocessableEntityException('Parol email bilan bir xil bo‘lmasligi kerak');
+    const problem = passwordProblem(dto.password, email);
+    if (problem) throw new UnprocessableEntityException(problem);
     const passwordHash = await argon2.hash(dto.password, { type: argon2.argon2id });
 
     let created: { storeId: string; userId: string };
@@ -320,11 +342,14 @@ export class AuthService {
 
   async verifyResetCode(dto: { challengeId: string; code: string }) {
     const ch = await this.checkCode(dto.challengeId, dto.code, 'PASSWORD_RESET');
+    // Kod faqat bir marta tasdiqlanadi: qayta yuborilsa yangi resetToken berilmaydi.
+    if (ch.verifiedAt) throw new UnauthorizedException(BAD_CODE);
     const resetToken = randomBytes(32).toString('base64url');
-    await this.prisma.authChallenge.update({
-      where: { id: ch.id },
+    const r = await this.prisma.authChallenge.updateMany({
+      where: { id: ch.id, verifiedAt: null, consumedAt: null },
       data: { verifiedAt: new Date(), resetTokenHash: sha256(resetToken), expiresAt: new Date(Date.now() + 15 * 60_000) },
     });
+    if (r.count !== 1) throw new UnauthorizedException(BAD_CODE);
     return { resetToken };
   }
 
@@ -334,6 +359,8 @@ export class AuthService {
       throw new BadRequestException('Tiklash muddati tugagan. Qaytadan boshlang');
     }
     const { userId, user: owner } = ch;
+    const problem = passwordProblem(newPassword, owner.login);
+    if (problem) throw new UnprocessableEntityException(problem);
     const passwordHash = await argon2.hash(newPassword, { type: argon2.argon2id });
     await this.prisma.$transaction(async (tx) => {
       const claimed = await tx.authChallenge.updateMany({ where: { id: ch.id, consumedAt: null }, data: { consumedAt: new Date() } });
@@ -356,12 +383,44 @@ export class AuthService {
     return { twoFactorEnabled: dto.enabled };
   }
 
+  /**
+   * Cookie asosidagi refresh uchun CSRF himoyasi (SameSite=Lax ga qo‘shimcha): brauzer boshqa saytdan
+   * yuborgan so‘rov (Sec-Fetch-Site: cross-site) rad etiladi. Same-origin (Next rewrite) va mobil
+   * ilova (cookie ishlatmaydi) ta’sirlanmaydi.
+   */
+  private assertSameSite(client: ClientInfo) {
+    if (client.secFetchSite === 'cross-site') throw new ForbiddenException('So‘rov boshqa saytdan yuborilgan');
+  }
+
   async refresh(token: string | undefined, client: ClientInfo, res: Response, mobile = false) {
     if (!token) throw new UnauthorizedException('Sessiya topilmadi');
+    if (!mobile) this.assertSameSite(client);
     const old = await this.prisma.session.findUnique({ where: { tokenHash: sha256(token) }, include: { user: true } });
-    if (!old || old.revokedAt || old.expiresAt < new Date() || old.user.status !== 'ACTIVE') {
+    if (!old || old.expiresAt < new Date() || old.user.status !== 'ACTIVE') {
       this.clearCookie(res);
       throw new UnauthorizedException('Sessiya tugagan');
+    }
+    if (old.revokedAt) {
+      // Bekor qilingan token qayta ishlatildi. Qisqa oyna ichida — parallel yangilanish (poyga).
+      // Undan keyin — token o‘g‘irlangan deb hisoblanadi: shu qurilma zanjiridagi (firstSeenAt) barcha sessiyalar yopiladi.
+      if (Date.now() - old.revokedAt.getTime() > REUSE_GRACE_MS) {
+        const r = await this.prisma.session.updateMany({
+          where: { userId: old.userId, firstSeenAt: old.firstSeenAt, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+        await this.audit.log(
+          { user: null, storeId: old.user.storeId, ip: client.ip },
+          { action: 'auth.refresh_reuse_detected', entityType: 'User', entityId: old.userId, metadata: { sessionId: old.id, revoked: r.count } },
+        );
+      }
+      this.clearCookie(res);
+      throw new UnauthorizedException('Sessiya tugagan');
+    }
+    // Mutlaq umr: rotatsiya cheksiz davom etmaydi — qayta kirish talab qilinadi.
+    if (old.firstSeenAt.getTime() + absoluteDays() * 86_400_000 < Date.now()) {
+      await this.prisma.session.updateMany({ where: { id: old.id, revokedAt: null }, data: { revokedAt: new Date() } });
+      this.clearCookie(res);
+      throw new UnauthorizedException('Sessiya muddati tugadi. Qaytadan kiring');
     }
     // Rotatsiya: eski sessiyani faqat bir marta "egallash" mumkin (parallel so‘rovlardan himoya).
     const rotated = await this.prisma.$transaction(async (tx) => {
@@ -462,6 +521,8 @@ export class AuthService {
     if (dto.currentPassword === dto.newPassword) {
       throw new UnprocessableEntityException('Yangi parol joriy paroldan farq qilishi kerak');
     }
+    const problem = passwordProblem(dto.newPassword, row.login);
+    if (problem) throw new UnprocessableEntityException(problem);
 
     const passwordHash = await argon2.hash(dto.newPassword, { type: argon2.argon2id });
     await this.prisma.$transaction(async (tx) => {

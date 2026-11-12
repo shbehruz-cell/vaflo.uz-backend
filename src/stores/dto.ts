@@ -1,7 +1,29 @@
 import { Transform } from 'class-transformer';
 import {
   ArrayMaxSize, IsArray, IsInt, IsObject, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength,
+  registerDecorator, type ValidationOptions,
 } from 'class-validator';
+
+/** JSON `settings` hajmi cheklangan (serializatsiya qilinganda, belgilar). */
+function MaxJsonSize(max: number, options?: ValidationOptions) {
+  return (object: object, propertyName: string) => {
+    registerDecorator({
+      name: 'maxJsonSize',
+      target: object.constructor,
+      propertyName,
+      options: { message: `Sozlamalar hajmi ${max} belgidan oshmasligi kerak`, ...options },
+      validator: {
+        validate(value: unknown) {
+          try {
+            return JSON.stringify(value).length <= max;
+          } catch {
+            return false;
+          }
+        },
+      },
+    });
+  };
+}
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 const trim = ({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value);
@@ -11,7 +33,7 @@ export class UpdateStoreDto {
   @ApiPropertyOptional({ example: 'Asia/Tashkent' })
   @IsOptional() @IsString() @MaxLength(64) @Matches(/^[A-Za-z_]+(\/[A-Za-z0-9_+-]+)*$/, { message: 'Vaqt zonasi noto‘g‘ri' })
   timezone?: string;
-  @ApiPropertyOptional() @IsOptional() @IsObject() settings?: Record<string, unknown>;
+  @ApiPropertyOptional() @IsOptional() @IsObject() @MaxJsonSize(20_000) settings?: Record<string, unknown>;
 }
 
 export class CreateWarehouseDto {

@@ -46,7 +46,11 @@ export class MailService {
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT ?? 587),
       secure: process.env.SMTP_SECURE === 'true',
+      // STARTTLS majburiy (parol ochiq matnda ketmasin). Faqat TLS’siz ichki relay uchun SMTP_REQUIRE_TLS=false.
+      requireTLS: process.env.SMTP_SECURE !== 'true' && process.env.SMTP_REQUIRE_TLS !== 'false',
       auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined,
+      connectionTimeout: 10_000,
+      socketTimeout: 20_000,
     });
     return this.transporter;
   }

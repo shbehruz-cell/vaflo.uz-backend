@@ -11,7 +11,15 @@ import { ChallengeDto, ChangePasswordDto, ForgotPasswordDto, LoginDto, RefreshDt
 
 /** Mobil ilova `X-Client: mobile` yuboradi: refresh token cookie o‘rniga javob/so‘rov tanasida. */
 const isMobile = (req: Request) => req.headers['x-client'] === 'mobile';
-const clientInfo = (req: Request) => ({ userAgent: req.headers['user-agent'], ip: req.ip, device: req.headers['x-device'] as string | undefined });
+const clientInfo = (req: Request) => ({
+  userAgent: req.headers['user-agent'],
+  ip: req.ip,
+  device: req.headers['x-device'] as string | undefined,
+  secFetchSite: req.headers['sec-fetch-site'] as string | undefined,
+});
+
+/** Ochiq auth endpointlari uchun ikki darajali limit: daqiqasiga va soatiga (IP bo‘yicha). */
+const limits = (perMinute: number, perHour: number) => ({ default: { limit: perMinute, ttl: 60_000 }, hourly: { limit: perHour, ttl: 3_600_000 } });
 
 @ApiTags('auth')
 @Controller('auth')
@@ -19,7 +27,7 @@ export class AuthController {
   constructor(private readonly auth: AuthService) {}
 
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Throttle(limits(5, 30))
   @Post('login')
   @HttpCode(200)
   login(
@@ -32,6 +40,7 @@ export class AuthController {
   }
 
   @Public()
+  @Throttle(limits(30, 300))
   @Post('refresh')
   @HttpCode(200)
   refresh(@Req() req: Request, @Res({ passthrough: true }) res: Response, @Body() dto: RefreshDto) {
@@ -41,7 +50,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Throttle(limits(10, 40))
   @Post('2fa/verify')
   @HttpCode(200)
   verifyTwoFactor(@Body() dto: VerifyCodeDto, @Req() req: Request, @Res({ passthrough: true }) res: Response, @AuditCtx() ctx: AuditContext) {
@@ -49,7 +58,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Throttle(limits(5, 20))
   @Post('code/resend')
   @HttpCode(200)
   resend(@Body() dto: ChallengeDto) {
@@ -57,7 +66,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Throttle(limits(5, 10))
   @Post('signup/start')
   @HttpCode(200)
   signupStart(@Body() dto: SignupStartDto) {
@@ -65,7 +74,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Throttle(limits(10, 40))
   @Post('signup/verify')
   @HttpCode(200)
   signupVerify(@Body() dto: VerifyCodeDto) {
@@ -73,7 +82,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Throttle(limits(5, 10))
   @Post('signup/complete')
   @HttpCode(200)
   signupComplete(@Body() dto: SignupCompleteDto, @Req() req: Request, @Res({ passthrough: true }) res: Response, @AuditCtx() ctx: AuditContext) {
@@ -81,7 +90,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Throttle(limits(5, 10))
   @Post('password/forgot')
   @HttpCode(200)
   forgot(@Body() dto: ForgotPasswordDto) {
@@ -89,7 +98,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Throttle(limits(10, 40))
   @Post('password/verify')
   @HttpCode(200)
   verifyReset(@Body() dto: VerifyCodeDto) {
@@ -97,7 +106,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Throttle(limits(5, 10))
   @Post('password/reset')
   @HttpCode(200)
   reset(@Body() dto: ResetPasswordDto, @AuditCtx() ctx: AuditContext) {
@@ -124,6 +133,7 @@ export class AuthController {
   }
 
   @ApiBearerAuth()
+  @Throttle(limits(10, 60))
   @Post('two-factor')
   @HttpCode(200)
   twoFactor(@CurrentUser() user: AuthUser, @Body() dto: TwoFactorDto, @AuditCtx() ctx: AuditContext) {
@@ -144,6 +154,7 @@ export class AuthController {
   }
 
   @ApiBearerAuth()
+  @Throttle(limits(10, 60))
   @Post('change-password')
   @HttpCode(200)
   changePassword(@CurrentUser() user: AuthUser, @Body() dto: ChangePasswordDto, @AuditCtx() ctx: AuditContext) {

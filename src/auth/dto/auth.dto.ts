@@ -1,6 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import { IsBoolean, IsEmail, IsOptional, IsString, IsUUID, Length, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsStrongPassword } from '../../common/password.js';
 
 export class LoginDto {
   @ApiProperty() @IsString() @MinLength(1) @MaxLength(120) login!: string;
@@ -9,7 +10,7 @@ export class LoginDto {
 
 export class ChangePasswordDto {
   @ApiProperty() @IsString() @MaxLength(200) currentPassword!: string;
-  @ApiProperty() @IsString() @MinLength(8) @MaxLength(200) newPassword!: string;
+  @ApiProperty() @IsString() @MinLength(8) @MaxLength(200) @IsStrongPassword() newPassword!: string;
 }
 
 export class RefreshDto {
@@ -32,7 +33,7 @@ export class ForgotPasswordDto {
 
 export class ResetPasswordDto {
   @ApiProperty() @IsString() @MinLength(20) @MaxLength(200) resetToken!: string;
-  @ApiProperty() @IsString() @MinLength(8) @MaxLength(200) newPassword!: string;
+  @ApiProperty() @IsString() @MinLength(8) @MaxLength(200) @IsStrongPassword() newPassword!: string;
 }
 
 export class TwoFactorDto {
@@ -50,5 +51,5 @@ export class SignupCompleteDto {
   @ApiProperty() @IsString() @MinLength(20) @MaxLength(200) signupToken!: string;
   @ApiProperty() @Transform(trim) @IsString() @MinLength(2) @MaxLength(80) name!: string;
   @ApiProperty() @Transform(trim) @IsString() @MinLength(2) @MaxLength(80) storeName!: string;
-  @ApiProperty() @IsString() @MinLength(8) @MaxLength(200) password!: string;
+  @ApiProperty() @IsString() @MinLength(8) @MaxLength(200) @IsStrongPassword() password!: string;
 }
