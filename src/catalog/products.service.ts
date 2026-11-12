@@ -4,13 +4,14 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService, type Tx } from '../prisma/prisma.service.js';
 import { AuditService, type AuditContext } from '../audit/audit.service.js';
 import { StockService } from '../inventory/stock.service.js';
 import type { AuthUser } from '../common/auth/auth-user.js';
-import { D, ZERO, isValidQty } from '../common/money.js';
+import { D, UNIT_SCALE, ZERO, isValidQty } from '../common/money.js';
 import { normalizeName } from '../common/normalize.js';
 import { paginated, skipOf } from '../common/pagination.dto.js';
 import type { CreateProductDto, ListProductsQuery, UpdateProductDto } from './dto/product.dto.js';
@@ -40,8 +41,9 @@ export class ProductsService {
   async resolveWarehouseId(storeId: string, warehouseId?: string, tx?: Tx): Promise<string | null> {
     const db = tx ?? this.prisma;
     if (warehouseId) {
-      const w = await db.warehouse.findFirst({ where: { id: warehouseId, storeId }, select: { id: true } });
+      const w = await db.warehouse.findFirst({ where: { id: warehouseId, storeId }, select: { id: true, status: true } });
       if (!w) throw new NotFoundException('Ombor topilmadi');
+      if (w.status !== 'ACTIVE') throw new UnprocessableEntityException('Ombor arxivlangan');
       return w.id;
     }
     const w = await db.warehouse.findFirst({
@@ -249,6 +251,11 @@ export class ProductsService {
       data.minStock = v;
       changed.push('minStock');
     }
+    const unitChanged = dto.unit !== undefined && dto.unit !== existing.unit;
+    if (unitChanged) {
+      data.unit = dto.unit;
+      changed.push('unit');
+    }
     if (dto.name !== undefined) {
       data.name = dto.name.trim();
       data.normalizedName = normalizeName(dto.name);
@@ -271,6 +278,7 @@ export class ProductsService {
       await this.prisma.$transaction(async (tx) => {
         await this.assertCategory(tx, storeId, dto.categoryId);
         await this.assertUnique(tx, storeId, barcodes, sku, id);
+        if (unitChanged) await this.assertUnitFits(tx, id, dto.unit!, (data.minStock as Prisma.Decimal | undefined) ?? existing.minStock);
         if (barcodes) {
           await tx.barcode.deleteMany({ where: { productId: id, storeId } });
           if (barcodes.length) await tx.barcode.createMany({ data: barcodes.map((value) => ({ storeId, productId: id, value })) });
@@ -287,6 +295,24 @@ export class ProductsService {
       this.wrapP2002(e);
     }
     return this.get(user, id);
+  }
+
+  /**
+   * Birlik o‘zgarganda mavjud miqdorlar yangi birlikka mos bo‘lishi kerak: masalan "kg" dan "dona" ga o‘tishda
+   * 12,5 kg qoldiq kasr bo‘lib qoladi. Bunday holda avval qoldiqni tuzatish so‘raladi (ma’lumot buzilmaydi).
+   */
+  private async assertUnitFits(tx: Tx, productId: string, unit: string, minStock: Prisma.Decimal) {
+    const scale = UNIT_SCALE[unit] ?? 3;
+    const balances = await tx.stockBalance.findMany({ where: { productId }, select: { qty: true } });
+    const bad = balances.find((b) => b.qty.decimalPlaces() > scale);
+    if (bad) {
+      throw new UnprocessableEntityException(
+        `Qoldiq ${bad.qty.toString()} — bu birlikda butun son bo‘lishi kerak. Avval qoldiqni tuzating, keyin birlikni o‘zgartiring`,
+      );
+    }
+    if (minStock.decimalPlaces() > scale) {
+      throw new UnprocessableEntityException('Minimal qoldiq bu birlik uchun butun son bo‘lishi kerak');
+    }
   }
 
   archive(ctx: AuditContext, user: AuthUser, id: string) {

@@ -1,9 +1,10 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma as P } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AuditService, type AuditContext } from '../audit/audit.service.js';
 import type { AuthUser } from '../common/auth/auth-user.js';
 import type { Prisma } from '../generated/prisma/client.js';
-import type { CreateRegisterDto, CreateWarehouseDto, UpdateRegisterDto, UpdateStoreDto } from './dto.js';
+import type { CreateRegisterDto, CreateWarehouseDto, UpdateRegisterDto, UpdateStoreDto, UpdateWarehouseDto } from './dto.js';
 
 function assertOwner(user: AuthUser) {
   if (user.roleKey !== 'owner') throw new ForbiddenException('Bu amal faqat egasi uchun');
@@ -59,6 +60,124 @@ export class StoresService {
       where: { storeId: user.storeId, status: 'ACTIVE' },
       orderBy: { createdAt: 'asc' },
     });
+  }
+
+  /**
+   * Omborlarni boshqarish ro‘yxati (faqat egasi): arxivlanganlar ham, har biri uchun statistika —
+   * qoldiqdagi mahsulotlar soni, qoldiq qiymati (tannarx bo‘yicha), bog‘langan faol kassalar, harakatlar soni.
+   */
+  async warehousesManage(user: AuthUser) {
+    assertOwner(user);
+    const rows = await this.prisma.warehouse.findMany({
+      where: { storeId: user.storeId },
+      orderBy: [{ status: 'asc' }, { createdAt: 'asc' }],
+      include: {
+        registers: { where: { status: 'ACTIVE' }, select: { id: true, name: true, code: true } },
+        _count: { select: { movements: true } },
+      },
+    });
+    const ids = rows.map((w) => w.id);
+    const stats = ids.length
+      ? await this.prisma.$queryRaw<{ warehouseId: string; products: bigint; value: P.Decimal | null }[]>`
+          SELECT b."warehouseId", COUNT(*) FILTER (WHERE b.qty <> 0) AS products,
+                 SUM(CASE WHEN b.qty > 0 THEN b.qty * p."costPrice" ELSE 0 END) AS value
+          FROM "StockBalance" b JOIN "Product" p ON p.id = b."productId"
+          WHERE b."warehouseId" IN (${P.join(ids.map((id) => P.sql`${id}::uuid`))})
+          GROUP BY b."warehouseId"`
+      : [];
+    const byId = new Map(stats.map((r) => [r.warehouseId, r]));
+    return rows.map((w) => ({
+      id: w.id,
+      name: w.name,
+      code: w.code,
+      status: w.status,
+      createdAt: w.createdAt,
+      registers: w.registers,
+      productsInStock: Number(byId.get(w.id)?.products ?? 0),
+      stockValue: new P.Decimal(byId.get(w.id)?.value ?? 0).toFixed(2),
+      movementsCount: w._count.movements,
+    }));
+  }
+
+  private async findWarehouse(user: AuthUser, id: string) {
+    const w = await this.prisma.warehouse.findFirst({ where: { id, storeId: user.storeId } });
+    if (!w) throw new NotFoundException('Ombor topilmadi');
+    return w;
+  }
+
+  async updateWarehouse(user: AuthUser, id: string, dto: UpdateWarehouseDto, ctx: AuditContext) {
+    assertOwner(user);
+    const w = await this.findWarehouse(user, id);
+    const data: { name?: string; code?: string } = {};
+    if (dto.name !== undefined && dto.name !== w.name) data.name = dto.name;
+    if (dto.code !== undefined && dto.code !== w.code) data.code = dto.code;
+    if (!Object.keys(data).length) return w;
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const u = await tx.warehouse.update({ where: { id: w.id }, data });
+        await this.audit.log(
+          ctx,
+          { action: 'warehouse.updated', entityType: 'Warehouse', entityId: w.id, metadata: { before: { name: w.name, code: w.code }, after: data } },
+          tx,
+        );
+        return u;
+      });
+    } catch (e) {
+      if (isUniqueViolation(e)) throw new ConflictException('Bu kodli ombor allaqachon mavjud');
+      throw e;
+    }
+  }
+
+  /** Qoldig‘i bor yoki faol kassa bog‘langan omborni arxivlab bo‘lmaydi; oxirgi faol ombor ham qoladi. */
+  async archiveWarehouse(user: AuthUser, id: string, ctx: AuditContext) {
+    assertOwner(user);
+    const w = await this.findWarehouse(user, id);
+    if (w.status === 'ARCHIVED') return w;
+    const [active, regs, stocked] = await Promise.all([
+      this.prisma.warehouse.count({ where: { storeId: user.storeId, status: 'ACTIVE' } }),
+      this.prisma.register.findMany({ where: { warehouseId: w.id, status: 'ACTIVE' }, select: { name: true } }),
+      this.prisma.stockBalance.count({ where: { warehouseId: w.id, qty: { not: 0 } } }),
+    ]);
+    if (active <= 1) throw new ConflictException('Bu yagona faol ombor — avval boshqa ombor qo‘shing');
+    if (regs.length) throw new ConflictException(`Omborga kassa bog‘langan: ${regs.map((r) => r.name).join(', ')}`);
+    if (stocked) throw new ConflictException(`Omborda ${stocked} ta mahsulot qoldig‘i bor — avval qoldiqni 0 ga tushiring`);
+    return this.prisma.$transaction(async (tx) => {
+      const u = await tx.warehouse.update({ where: { id: w.id }, data: { status: 'ARCHIVED' } });
+      await this.audit.log(ctx, { action: 'warehouse.archived', entityType: 'Warehouse', entityId: w.id, metadata: { name: w.name } }, tx);
+      return u;
+    });
+  }
+
+  async restoreWarehouse(user: AuthUser, id: string, ctx: AuditContext) {
+    assertOwner(user);
+    const w = await this.findWarehouse(user, id);
+    if (w.status === 'ACTIVE') return w;
+    return this.prisma.$transaction(async (tx) => {
+      const u = await tx.warehouse.update({ where: { id: w.id }, data: { status: 'ACTIVE' } });
+      await this.audit.log(ctx, { action: 'warehouse.restored', entityType: 'Warehouse', entityId: w.id, metadata: { name: w.name } }, tx);
+      return u;
+    });
+  }
+
+  /** Butunlay o‘chirish faqat hech qachon ishlatilmagan omborga (harakat, qoldiq yozuvi, kassa yo‘q). Aks holda — arxivlash. */
+  async deleteWarehouse(user: AuthUser, id: string, ctx: AuditContext) {
+    assertOwner(user);
+    const w = await this.findWarehouse(user, id);
+    const [moves, balances, regs, otherActive] = await Promise.all([
+      this.prisma.stockMovement.count({ where: { warehouseId: w.id } }),
+      this.prisma.stockBalance.count({ where: { warehouseId: w.id } }),
+      this.prisma.register.count({ where: { warehouseId: w.id } }),
+      this.prisma.warehouse.count({ where: { storeId: user.storeId, status: 'ACTIVE', id: { not: w.id } } }),
+    ]);
+    if (moves || balances || regs) {
+      throw new ConflictException('Ombor ishlatilgan (harakatlar yoki kassa bor) — o‘chirib bo‘lmaydi, arxivlang');
+    }
+    if (w.status === 'ACTIVE' && otherActive === 0) throw new ConflictException('Bu yagona faol ombor — o‘chirib bo‘lmaydi');
+    await this.prisma.$transaction(async (tx) => {
+      await tx.warehouse.delete({ where: { id: w.id } });
+      await this.audit.log(ctx, { action: 'warehouse.deleted', entityType: 'Warehouse', entityId: w.id, metadata: { name: w.name, code: w.code } }, tx);
+    });
+    return { ok: true };
   }
 
   /**

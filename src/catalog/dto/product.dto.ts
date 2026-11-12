@@ -64,6 +64,8 @@ export class CreateProductDto {
 
 export class UpdateProductDto {
   @ApiPropertyOptional() @IsOptional() @IsString() @IsNotEmpty() @MaxLength(200) name?: string;
+  /** O‘lchov birligi. Butun sonli birlikka (dona/quti) o‘tishda qoldiq va minimal qoldiq butun bo‘lishi shart. */
+  @ApiPropertyOptional({ enum: Unit }) @IsOptional() @IsEnum(Unit) unit?: Unit;
   /** null — SKU ni olib tashlash. */
   @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(64) sku?: string | null;
   /** null — kategoriyadan chiqarish. */

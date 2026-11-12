@@ -41,6 +41,11 @@ export class CreateWarehouseDto {
   @ApiProperty() @Transform(trim) @IsString() @MinLength(1) @MaxLength(30) code!: string;
 }
 
+export class UpdateWarehouseDto {
+  @ApiPropertyOptional() @IsOptional() @Transform(trim) @IsString() @MinLength(1) @MaxLength(100) name?: string;
+  @ApiPropertyOptional() @IsOptional() @Transform(trim) @IsString() @MinLength(1) @MaxLength(30) code?: string;
+}
+
 export class CreateRegisterDto {
   @ApiProperty() @Transform(trim) @IsString() @MinLength(1) @MaxLength(100) name!: string;
   @ApiProperty() @Transform(trim) @IsString() @MinLength(1) @MaxLength(30) code!: string;

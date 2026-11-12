@@ -36,7 +36,8 @@ const refreshDays = () => Number(process.env.REFRESH_TTL_DAYS ?? 30) || 30;
 /** Sessiyaning mutlaq umri (kun): refresh rotatsiyasi bilan ham shundan uzoq yashamaydi. */
 const absoluteDays = () => Number(process.env.REFRESH_ABSOLUTE_DAYS ?? 180) || 180;
 /** Bekor qilingan refresh token shu muddat ichida qayta kelsa — parallel so‘rov (poyga) deb hisoblanadi, undan keyin — o‘g‘irlik. */
-const REUSE_GRACE_MS = 10_000;
+/** Rotatsiyadan keyin eski token qisqa vaqt yaroqli: yangi cookie brauzerga yetib bormagan holatlar (Safari so‘rovni uzsa, parallel refresh). */
+const REUSE_GRACE_MS = 30_000;
 
 interface ClientInfo {
   userAgent?: string;
@@ -401,9 +402,17 @@ export class AuthService {
       throw new UnauthorizedException('Sessiya tugagan');
     }
     if (old.revokedAt) {
-      // Bekor qilingan token qayta ishlatildi. Qisqa oyna ichida — parallel yangilanish (poyga).
+      // Bekor qilingan token qayta ishlatildi. Qisqa oyna ichida — parallel yangilanish yoki yangi cookie brauzerga
+      // yetib bormagan (iOS Safari sahifa yangilanganda so‘rovni uzadi). Bu holatda foydalanuvchi chiqarib yuborilmaydi:
+      // shu zanjirda yangi sessiya beriladi.
+      if (Date.now() - old.revokedAt.getTime() <= REUSE_GRACE_MS) {
+        const sibling = await this.createSession(old.userId, client, this.prisma, { firstSeenAt: old.firstSeenAt, deviceName: old.deviceName, platform: old.platform, ip: old.ip, city: old.city, country: old.country, latitude: old.latitude, longitude: old.longitude });
+        const accessToken = await this.jwt.signAsync({ sub: old.userId, sid: sibling.session.id });
+        if (!mobile) this.setCookie(res, sibling.token);
+        return { accessToken, ...(mobile ? { refreshToken: sibling.token } : {}) };
+      }
       // Undan keyin — token o‘g‘irlangan deb hisoblanadi: shu qurilma zanjiridagi (firstSeenAt) barcha sessiyalar yopiladi.
-      if (Date.now() - old.revokedAt.getTime() > REUSE_GRACE_MS) {
+      {
         const r = await this.prisma.session.updateMany({
           where: { userId: old.userId, firstSeenAt: old.firstSeenAt, revokedAt: null },
           data: { revokedAt: new Date() },
@@ -432,8 +441,12 @@ export class AuthService {
       return this.createSession(old.userId, client, tx, { firstSeenAt: old.firstSeenAt, deviceName: old.deviceName, platform: old.platform, ip: old.ip, city: old.city, country: old.country, latitude: old.latitude, longitude: old.longitude });
     });
     if (!rotated) {
-      this.clearCookie(res);
-      throw new UnauthorizedException('Sessiya tugagan');
+      // Parallel refresh boshqa so‘rovda yutgan (eski token hozirgina bekor qilindi) — chiqarib yubormasdan
+      // shu zanjirda alohida sessiya beriladi.
+      const sibling = await this.createSession(old.userId, client, this.prisma, { firstSeenAt: old.firstSeenAt, deviceName: old.deviceName, platform: old.platform, ip: old.ip, city: old.city, country: old.country, latitude: old.latitude, longitude: old.longitude });
+      const accessToken = await this.jwt.signAsync({ sub: old.userId, sid: sibling.session.id });
+      if (!mobile) this.setCookie(res, sibling.token);
+      return { accessToken, ...(mobile ? { refreshToken: sibling.token } : {}) };
     }
     const accessToken = await this.jwt.signAsync({ sub: old.userId, sid: rotated.session.id });
     if (!mobile) this.setCookie(res, rotated.token);
