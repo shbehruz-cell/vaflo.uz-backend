@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { isIP } from 'node:net';
 
 export interface GeoResult {
   city: string | null;
@@ -18,7 +19,9 @@ export class GeoService {
   private readonly log = new Logger(GeoService.name);
 
   async locate(ip?: string | null): Promise<GeoResult | null> {
-    if (!ip || PRIVATE.test(ip.replace(/^::ffff:/i, ''))) return null;
+    // GEO_LOOKUP=false — foydalanuvchi IP’lari tashqi xizmatga umuman yuborilmaydi
+    if (process.env.GEO_LOOKUP === 'false') return null;
+    if (!ip || !isIP(ip.replace(/^::ffff:/i, '')) || PRIVATE.test(ip.replace(/^::ffff:/i, ''))) return null;
     try {
       const res = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,city,country,latitude,longitude`, {
         signal: AbortSignal.timeout(3000),

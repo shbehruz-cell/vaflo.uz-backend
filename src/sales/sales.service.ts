@@ -1,5 +1,5 @@
 import {
-  ConflictException, ForbiddenException, Injectable, NotFoundException,
+  ConflictException, ForbiddenException, Injectable, Logger, NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client.js';
@@ -70,7 +70,9 @@ export class SalesService {
         // aks holda receiptNo to‘qnashuvi — butun tranzaksiyani qayta urinamiz
       }
     }
-    throw new ConflictException({ message: 'Chek raqamini yaratib bo‘lmadi, qayta urinib ko‘ring', cause: String(lastErr) });
+    // Ichki xato matni clientga chiqmaydi — faqat logga.
+    Logger.warn(`Chek raqami to‘qnashuvi (${RECEIPT_RETRIES} urinish): ${String(lastErr)}`, SalesService.name);
+    throw new ConflictException('Chek raqamini yaratib bo‘lmadi, qayta urinib ko‘ring');
   }
 
   private async createInTx(tx: Tx, user: AuthUser, dto: CreateSaleDto, ctx: AuditContext) {

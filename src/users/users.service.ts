@@ -10,6 +10,8 @@ import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService, type Tx } from '../prisma/prisma.service.js';
 import { AuditService, type AuditContext } from '../audit/audit.service.js';
 import { normalizeLogin } from '../common/normalize.js';
+import { passwordProblem } from '../common/password.js';
+import type { PermissionCode } from '../common/permissions.js';
 import { paginated, skipOf } from '../common/pagination.dto.js';
 import type { AuthUser } from '../common/auth/auth-user.js';
 import type { CreateUserDto, ListUsersQuery, ResetPasswordDto, UpdateUserDto } from './dto/users.dto.js';
@@ -63,17 +65,31 @@ export class UsersService {
   }
 
   private async loadRole(db: PrismaService | Tx, storeId: string, roleId: string) {
-    const role = await db.role.findFirst({ where: { id: roleId, storeId } });
+    const role = await db.role.findFirst({ where: { id: roleId, storeId }, include: { permissions: { select: { permissionCode: true } } } });
     if (!role) throw new NotFoundException('Rol topilmadi');
     return role;
   }
 
+  /**
+   * Ruxsat ko‘tarilishiga (privilege escalation) qarshi: owner bo‘lmagan xodim faqat o‘zida bor
+   * ruxsatlardan iborat rolni tayinlay oladi. Aks holda `users.manage` egasi o‘ziga/boshqaga
+   * kengroq rol berib, amalda owner darajasiga chiqib ketishi mumkin edi.
+   */
+  private assertCanAssign(actor: AuthUser, role: { key: string; permissions: { permissionCode: string }[] }) {
+    if (actor.roleKey === 'owner') return;
+    if (role.key === 'owner') throw new ForbiddenException('Owner rolini faqat owner tayinlay oladi');
+    const missing = role.permissions.map((p) => p.permissionCode as PermissionCode).filter((p) => !actor.permissions.has(p));
+    if (missing.length) {
+      throw new ForbiddenException(`Bu rolda sizda bo‘lmagan ruxsatlar bor (${missing.join(', ')}). Uni faqat owner tayinlay oladi`);
+    }
+  }
+
   async create(actor: AuthUser, dto: CreateUserDto, ctx: AuditContext) {
     const role = await this.loadRole(this.prisma, actor.storeId, dto.roleId);
-    if (role.key === 'owner' && actor.roleKey !== 'owner') {
-      throw new ForbiddenException('Owner rolini faqat owner tayinlay oladi');
-    }
+    this.assertCanAssign(actor, role);
     const login = normalizeLogin(dto.login);
+    const problem = passwordProblem(dto.password, login);
+    if (problem) throw new UnprocessableEntityException(problem);
     if (await this.prisma.user.findUnique({ where: { login }, select: { id: true } })) {
       throw new ConflictException('Bu login band');
     }
@@ -113,12 +129,11 @@ export class UsersService {
         throw new ForbiddenException('Owner xodimni faqat owner tahrirlay oladi');
       }
 
-      let newRole = target.role;
+      let newRole: { id: string; key: string } = target.role;
       if (dto.roleId !== undefined && dto.roleId !== target.roleId) {
-        newRole = await this.loadRole(tx, actor.storeId, dto.roleId);
-        if (newRole.key === 'owner' && actor.roleKey !== 'owner') {
-          throw new ForbiddenException('Owner rolini faqat owner tayinlay oladi');
-        }
+        const loaded = await this.loadRole(tx, actor.storeId, dto.roleId);
+        this.assertCanAssign(actor, loaded);
+        newRole = loaded;
       }
       const newStatus = dto.status ?? target.status;
 
@@ -158,13 +173,15 @@ export class UsersService {
     if (id === actor.id) {
       throw new UnprocessableEntityException('O‘z parolingizni “Parolni o‘zgartirish” orqali yangilang');
     }
-    const passwordHash = await argon2.hash(dto.newPassword, { type: argon2.argon2id });
     await this.prisma.$transaction(async (tx) => {
       const target = await tx.user.findFirst({ where: { id, storeId: actor.storeId }, include: { role: true } });
       if (!target) throw new NotFoundException('Xodim topilmadi');
       if (target.role.key === 'owner' && actor.roleKey !== 'owner') {
         throw new ForbiddenException('Owner xodimni faqat owner tahrirlay oladi');
       }
+      const problem = passwordProblem(dto.newPassword, target.login);
+      if (problem) throw new UnprocessableEntityException(problem);
+      const passwordHash = await argon2.hash(dto.newPassword, { type: argon2.argon2id });
       await tx.user.update({ where: { id: target.id }, data: { passwordHash } });
       await tx.session.updateMany({ where: { userId: target.id, revokedAt: null }, data: { revokedAt: new Date() } });
       await this.audit.log(ctx, { action: 'user.password_reset', entityType: 'User', entityId: target.id }, tx);

@@ -4,6 +4,15 @@ on:
   push:
     branches: [ main ] # Agar sizda asosiy branch nomi 'master' bo'lsa, buni master deb o'zgartiring
 
+# GITHUB_TOKEN uchun eng kam huquq: workflow repo’ga yozmaydi
+permissions:
+  contents: read
+
+# Bir vaqtda faqat bitta deploy
+concurrency:
+  group: backend-production
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
