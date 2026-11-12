@@ -3,6 +3,13 @@ name: CI/CD Production Deployment
 on:
   push:
     branches: [ main ] # Agar sizda asosiy branch nomi 'master' bo'lsa, buni master deb o'zgartiring
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "deploy — odatiy yangilash; diagnose — faqat holat va loglar (hech narsa o'zgartirilmaydi)"
+        type: choice
+        default: diagnose
+        options: [deploy, diagnose]
 
 # GITHUB_TOKEN uchun eng kam huquq: workflow repo’ga yozmaydi
 permissions:
@@ -19,23 +26,44 @@ jobs:
     steps:
       - name: SSH orqali serverga ulanish va loyihani yangilash
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          ACTION: ${{ github.event.inputs.action || 'deploy' }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
+          envs: ACTION
           script: |
             cd /home/vaflo.uz
-            
-            # Server xavfsizligi va git ziddiyatlarini oldini olish uchun
-            git fetch --all
-            git reset --hard origin/main
-            
-            # Agar sizda deploy.sh skripti bo'lsa uni ishga tushiradi
-            if [ -f deploy.sh ]; then
-              chmod +x deploy.sh
-              ./deploy.sh
-            else
-              # Skript bo'lmasa, PM2 orqali loyihani yangilaydi
-              pm2 reload ecosystem.config.cjs --env production
+            echo "ACTION=$ACTION"
+
+            if [ "$ACTION" = "deploy" ]; then
+              # Server xavfsizligi va git ziddiyatlarini oldini olish uchun
+              git fetch --all
+              git reset --hard origin/main
+
+              # Agar sizda deploy.sh skripti bo'lsa uni ishga tushiradi
+              if [ -f deploy.sh ]; then
+                chmod +x deploy.sh
+                ./deploy.sh
+              else
+                # Skript bo'lmasa, PM2 orqali loyihani yangilaydi
+                pm2 reload ecosystem.config.cjs --env production
+              fi
             fi
+
+            # ===== Diagnostika (faqat o'qish; .env QIYMATLARI hech qachon chiqarilmaydi) =====
+            echo "--- kataloglar"; ls -la /home/vaflo.uz | head -30
+            echo "--- pm2 ro'yxati"; pm2 ls
+            echo "--- pm2 describe backend"; pm2 describe backend 2>/dev/null | grep -E 'script|cwd|status|restarts|error log|out log' || true
+            echo "--- portlar"; (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -E ':(3000|3001|4000|4001) ' || true
+            ENV_FILE=$(grep -lsE '^JWT_ACCESS_SECRET=' /home/vaflo.uz/.env /home/vaflo.uz/*/.env 2>/dev/null | head -1 || true)
+            echo "--- backend .env: ${ENV_FILE:-topilmadi} (faqat kalit nomlari va qiymat uzunligi)"
+            if [ -n "$ENV_FILE" ]; then
+              grep -E '^[A-Z_]+=' "$ENV_FILE" | awk -F= '{v=substr($0,length($1)+2); gsub(/"/,"",v); printf "%s len=%d\n",$1,length(v)}'
+            fi
+            echo "--- backend xato logi (oxirgi 60 qator)"; pm2 logs backend --nostream --lines 60 --err 2>/dev/null || true
+            echo "--- backend out logi (oxirgi 20 qator)"; pm2 logs backend --nostream --lines 20 --out 2>/dev/null || true
+            echo "--- health"; curl -s -m 5 http://127.0.0.1:4000/api/v1/health || echo "(4000 javob bermadi)"
+            echo "Tayyor"
