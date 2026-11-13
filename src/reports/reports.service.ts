@@ -156,7 +156,7 @@ export class ReportsService {
         this.prisma.$queryRaw<{ v: Prisma.Decimal }[]>`
           SELECT COALESCE(SUM(sb.qty * p."costPrice"), 0) AS v
           FROM "StockBalance" sb JOIN "Product" p ON p.id = sb."productId"
-          WHERE p."storeId" = ${user.storeId}::uuid AND sb.qty > 0`,
+          WHERE p."storeId" = ${user.storeId}::uuid AND p."isActive" = true AND sb.qty > 0`,
       ]);
       out.grossProfit = new Prisma.Decimal(profit[0]?.p ?? 0).minus(new Prisma.Decimal(refProfit[0]?.p ?? 0)).toFixed(2);
       out.profitNote =

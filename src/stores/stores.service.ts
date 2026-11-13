@@ -82,7 +82,7 @@ export class StoresService {
           SELECT b."warehouseId", COUNT(*) FILTER (WHERE b.qty <> 0) AS products,
                  SUM(CASE WHEN b.qty > 0 THEN b.qty * p."costPrice" ELSE 0 END) AS value
           FROM "StockBalance" b JOIN "Product" p ON p.id = b."productId"
-          WHERE b."warehouseId" IN (${P.join(ids.map((id) => P.sql`${id}::uuid`))})
+          WHERE p."isActive" = true AND b."warehouseId" IN (${P.join(ids.map((id) => P.sql`${id}::uuid`))})
           GROUP BY b."warehouseId"`
       : [];
     const byId = new Map(stats.map((r) => [r.warehouseId, r]));
@@ -136,7 +136,7 @@ export class StoresService {
     const [active, regs, stocked] = await Promise.all([
       this.prisma.warehouse.count({ where: { storeId: user.storeId, status: 'ACTIVE' } }),
       this.prisma.register.findMany({ where: { warehouseId: w.id, status: 'ACTIVE' }, select: { name: true } }),
-      this.prisma.stockBalance.count({ where: { warehouseId: w.id, qty: { not: 0 } } }),
+      this.prisma.stockBalance.count({ where: { warehouseId: w.id, qty: { not: 0 }, product: { isActive: true } } }),
     ]);
     if (active <= 1) throw new ConflictException('Bu yagona faol ombor — avval boshqa ombor qo‘shing');
     if (regs.length) throw new ConflictException(`Omborga kassa bog‘langan: ${regs.map((r) => r.name).join(', ')}`);

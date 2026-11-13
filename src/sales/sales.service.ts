@@ -100,7 +100,7 @@ export class SalesService {
     const lines = productIds.map((pid) => {
       const p = byId.get(pid);
       if (!p) throw new NotFoundException({ message: 'Mahsulot topilmadi', productId: pid });
-      if (!p.isActive) throw new UnprocessableEntityException({ message: `"${p.name}" arxivlangan`, productId: pid });
+      if (!p.isActive) throw new UnprocessableEntityException({ message: `"${p.name}" o‘chirilgan`, productId: pid });
       const m = merged.get(pid)!;
       if (!isValidQty(m.qty, p.unit)) {
         throw new UnprocessableEntityException({ message: `"${p.name}" uchun miqdor noto‘g‘ri`, productId: pid });

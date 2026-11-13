@@ -29,7 +29,7 @@ export function validateEnv(env: NodeJS.ProcessEnv = process.env) {
   const ttl = Number(env.JWT_ACCESS_TTL ?? 900);
   if (!Number.isFinite(ttl) || ttl <= 0 || ttl > 86_400) errors.push('JWT_ACCESS_TTL 1 dan 86400 soniyagacha bo‘lishi kerak');
 
-  const refreshDays = Number(env.REFRESH_TTL_DAYS ?? 30);
+  const refreshDays = Number(env.REFRESH_TTL_DAYS ?? 10);
   if (!Number.isFinite(refreshDays) || refreshDays <= 0 || refreshDays > 365) errors.push('REFRESH_TTL_DAYS 1 dan 365 kungacha bo‘lishi kerak');
 
   if (isProd) {

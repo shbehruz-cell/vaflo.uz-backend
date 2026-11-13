@@ -67,12 +67,13 @@ export class ProductsService {
       ];
     }
     if (q.categoryId) where.categoryId = q.categoryId;
-    if (q.isActive !== undefined) where.isActive = q.isActive;
+    // O‘chirilgan (yashirilgan) mahsulotlar ro‘yxatda hech qachon ko‘rinmaydi
+    where.isActive = true;
     if (q.lowStock) {
       const rows = await this.prisma.$queryRaw<{ id: string }[]>`
         SELECT p.id FROM "Product" p
         LEFT JOIN "StockBalance" b ON b."productId" = p.id AND b."warehouseId" = ${warehouseId}::uuid
-        WHERE p."storeId" = ${storeId}::uuid AND COALESCE(b.qty, 0) <= p."minStock"`;
+        WHERE p."storeId" = ${storeId}::uuid AND p."isActive" = true AND COALESCE(b.qty, 0) <= p."minStock"`;
       where.id = { in: rows.map((r) => r.id) };
     }
     const orderBy: Prisma.ProductOrderByWithRelationInput =
@@ -315,21 +316,31 @@ export class ProductsService {
     }
   }
 
-  archive(ctx: AuditContext, user: AuthUser, id: string) {
-    return this.setActive(ctx, user, id, false);
-  }
-
-  restore(ctx: AuditContext, user: AuthUser, id: string) {
-    return this.setActive(ctx, user, id, true);
-  }
-
-  private async setActive(ctx: AuditContext, user: AuthUser, id: string, isActive: boolean) {
-    const existing = await this.prisma.product.findFirst({ where: { id, storeId: user.storeId }, select: { id: true } });
-    if (!existing) throw new NotFoundException('Mahsulot topilmadi');
+  /**
+   * Mahsulotni o‘chirish.
+   * - Hech qachon sotilmagan va ombor harakati bo‘lmagan — butunlay o‘chiriladi ("hard").
+   * - Tarixi bor — yashiriladi ("soft"): ro‘yxat, kassa, qoldiq va ombor qiymatida ko‘rinmaydi, eski cheklar
+   *   va harakatlar tarixi saqlanadi. SKU va shtrix-kodlar bo‘shatiladi — xuddi shu mahsulotni qayta qo‘shish mumkin.
+   */
+  async remove(ctx: AuditContext, user: AuthUser, id: string) {
+    const storeId = user.storeId;
+    const p = await this.prisma.product.findFirst({ where: { id, storeId }, select: { id: true, name: true, sku: true, isActive: true } });
+    if (!p) throw new NotFoundException('Mahsulot topilmadi');
+    const [sold, moved] = await Promise.all([
+      this.prisma.saleItem.count({ where: { productId: id } }),
+      this.prisma.stockMovement.count({ where: { productId: id } }),
+    ]);
+    const mode: 'hard' | 'soft' = sold === 0 && moved === 0 ? 'hard' : 'soft';
     await this.prisma.$transaction(async (tx) => {
-      await tx.product.update({ where: { id }, data: { isActive } });
-      await this.audit.log(ctx, { action: isActive ? 'product.restored' : 'product.archived', entityType: 'Product', entityId: id }, tx);
+      await tx.barcode.deleteMany({ where: { productId: id, storeId } });
+      if (mode === 'hard') {
+        await tx.stockBalance.deleteMany({ where: { productId: id } });
+        await tx.product.delete({ where: { id } });
+      } else {
+        await tx.product.update({ where: { id }, data: { isActive: false, sku: null } });
+      }
+      await this.audit.log(ctx, { action: 'product.deleted', entityType: 'Product', entityId: id, metadata: { name: p.name, sku: p.sku, mode } }, tx);
     });
-    return this.get(user, id);
+    return { ok: true, mode };
   }
 }

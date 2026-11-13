@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, UploadedFiles, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, UploadedFiles, UseInterceptors } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiTags } from '@nestjs/swagger';
@@ -100,17 +100,10 @@ export class ProductsController {
     return this.service.update(ctx, user, id, dto);
   }
 
-  @Post(':id/archive')
-  @HttpCode(200)
+  /** O‘chirish: ishlatilmagan mahsulot butunlay, tarixi bor mahsulot yashiriladi (cheklar va hisobotlar buzilmaydi). */
+  @Delete(':id')
   @RequirePermissions('products.manage')
-  archive(@CurrentUser() user: AuthUser, @AuditCtx() ctx: AuditContext, @Param('id', ParseUUIDPipe) id: string) {
-    return this.service.archive(ctx, user, id);
-  }
-
-  @Post(':id/restore')
-  @HttpCode(200)
-  @RequirePermissions('products.manage')
-  restore(@CurrentUser() user: AuthUser, @AuditCtx() ctx: AuditContext, @Param('id', ParseUUIDPipe) id: string) {
-    return this.service.restore(ctx, user, id);
+  remove(@CurrentUser() user: AuthUser, @AuditCtx() ctx: AuditContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.service.remove(ctx, user, id);
   }
 }

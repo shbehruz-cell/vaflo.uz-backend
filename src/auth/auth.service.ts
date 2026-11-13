@@ -32,7 +32,8 @@ const SIGNUP_TOKEN_TTL_MIN = 30;
 const SIGNUP_STARTS_PER_HOUR = 5;
 /** Band email uchun signup urinishi: kod yo‘q, hech qachon tasdiqlanmaydi (codeHash shu qiymat). */
 const EXISTS_MARK = 'EXISTS';
-const refreshDays = () => Number(process.env.REFRESH_TTL_DAYS ?? 30) || 30;
+/** Sessiya umri: oxirgi faollikdan keyin shuncha kun ichida qayta kirish talab qilinmaydi (har yangilashda uzayadi). */
+const refreshDays = () => Number(process.env.REFRESH_TTL_DAYS ?? 10) || 10;
 /** Sessiyaning mutlaq umri (kun): refresh rotatsiyasi bilan ham shundan uzoq yashamaydi. */
 const absoluteDays = () => Number(process.env.REFRESH_ABSOLUTE_DAYS ?? 180) || 180;
 /** Bekor qilingan refresh token shu muddat ichida qayta kelsa — parallel so‘rov (poyga) deb hisoblanadi, undan keyin — o‘g‘irlik. */
